@@ -1,23 +1,45 @@
 const $=id=>document.getElementById(id);
-const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const date=t=>t?new Date(t*1000).toLocaleString():'Pending';
-async function mutate(path,data){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const body=await r.json();if(!r.ok)throw Error(body.error);await refresh();}
-async function refresh(){try{const r=await fetch('/api/state');if(!r.ok)throw Error('Server unavailable');const s=await r.json();$('health').textContent=s.ping_available?`Polling every ${s.interval}s`:'Ping unavailable — install iputils-ping';
+let csrf='', latestState=null;
+async function request(path,data){const options=data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(data)};const r=await fetch(path,options);const body=await r.json();if(!r.ok){if(r.status===401&&path!=='/api/login')showLogin();throw Error(body.error||'Request failed');}return body;}
+async function mutate(path,data){await request(path,data);await refresh();}
+function showLogin(){csrf='';$('app-shell').hidden=true;$('login-screen').hidden=false;}
+async function signedIn(session){csrf=session.csrf;$('current-user').textContent=session.username;$('login-screen').hidden=true;$('app-shell').hidden=false;await refresh();}
+$('login-form').onsubmit=async e=>{e.preventDefault();try{const session=await request('/api/login',Object.fromEntries(new FormData(e.target)));e.target.reset();$('login-error').textContent='';await signedIn(session);}catch(error){$('login-error').textContent=error.message;}};
+$('logout').onclick=async()=>{try{await request('/api/logout',{});showLogin();}catch(error){$('message').textContent=error.message;}};
+const badge=(state,type='')=>`<span class="badge state-${esc(state)}">${esc(state)}</span>${type==='SOFT'&&state!=='PENDING'?' <small>retrying</small>':''}`;
+function problemsOf(s){const now=Date.now()/1000;return [...s.devices.map(d=>({...d,target:'host',host_name:d.name,check_name:'Host ping'})),...s.services.map(c=>({...c,target:'service',check_name:c.name}))].filter(c=>!['OK','PENDING'].includes(c.state)).map(c=>({...c,maintenance:c.maintenance_until>now}));}
+function ackButton(c){return c.acknowledged?'':`<button data-ack="${c.id}" data-target="${c.target}">Acknowledge</button>`;}
+function hostRows(s){const group=$('group-filter').value;$('devices').innerHTML=s.devices.filter(d=>!group||d.group_name===group).map(d=>`<tr><td><strong>${esc(d.name)}</strong></td><td>${esc(d.ip)}</td><td>${esc(d.kind)}<br>${esc(d.brand)} ${esc(d.model)}<br><small>${esc(d.group_name)}</small></td><td>${badge(d.state,d.state_type)}${d.maintenance_until>Date.now()/1000?'<br><small>Maintenance</small>':''}</td><td>${d.latency==null?'—':d.latency+' ms'}</td><td>${esc(d.output)}<br><small>${date(d.checked_at)}</small></td><td class="actions"><button data-edit="${d.id}">Edit</button><button data-maintenance="${d.id}" data-minutes="${d.maintenance_until>Date.now()/1000?0:60}">${d.maintenance_until>Date.now()/1000?'End maintenance':'Maintain 1h'}</button><button data-device="${d.id}">Remove</button></td></tr>`).join('')||'<tr><td colspan="7">No matching hosts. Open Add / Discover devices to add your network.</td></tr>';}
+function renderOperations(s){
+const issues=problemsOf(s),active=issues.filter(c=>c.state_type==='HARD'&&!c.acknowledged&&!c.maintenance);
+$('summary').innerHTML=[['Hosts UP',s.devices.filter(d=>d.state==='OK').length],['Hosts DOWN',s.devices.filter(d=>d.state==='CRITICAL').length],['Services OK',s.services.filter(c=>c.state==='OK').length],['Active problems',active.length]].map(([k,v])=>`<div class="stat">${k}<strong>${v}</strong></div>`).join('');
+$('engine-banner').textContent=`Engine: ${s.engine.status.toUpperCase()} · ${s.engine.message}`;$('engine-banner').classList.toggle('engine-error',s.engine.status==='error');
+$('active-problems').innerHTML=active.slice(0,12).map(c=>`<div class="problem-card">${badge(c.state)}<div><strong>${esc(c.host_name)} / ${esc(c.check_name)}</strong><p>${esc(c.output)}</p></div>${ackButton(c)}</div>`).join('')||'<p>No unhandled HARD problems. Check pending or retrying checks below.</p>';
+$('problems').innerHTML=issues.map(c=>`<tr><td>${esc(c.host_name)}<br><small>${esc(c.check_name)}</small></td><td>${badge(c.state,c.state_type)}</td><td>${esc(c.output)}</td><td>${c.maintenance?'Maintenance until '+date(c.maintenance_until):c.acknowledged?'Acknowledged: '+esc(c.ack_note):'Unhandled'}</td><td class="actions">${ackButton(c)}</td></tr>`).join('')||'<tr><td colspan="5">No current problems.</td></tr>';
+$('services').innerHTML=s.services.map(c=>`<tr><td>${esc(c.host_name)}<br><small>${esc(c.ip)}</small></td><td>${esc(c.name)}<br><small>${esc(c.kind.toUpperCase())} · port ${c.port} · ${c.interval}s</small></td><td>${badge(c.state,c.state_type)}${c.acknowledged?'<br><small>Acknowledged</small>':''}</td><td>${c.attempts}/${c.max_attempts} ${esc(c.state_type)}</td><td>${esc(c.output)}</td><td>${date(c.checked_at)}</td><td class="actions"><button data-service="${c.id}">Remove</button></td></tr>`).join('')||'<tr><td colspan="7">Add service checks below. Each host already has an automatic ping check.</td></tr>';
+const group=$('group-filter').value;const groups=[...new Set(s.devices.map(d=>d.group_name))].sort();$('group-filter').innerHTML='<option value="">All groups</option>'+groups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');if(groups.includes(group))$('group-filter').value=group;hostRows(s);
+}
+$('group-filter').onchange=()=>{if(latestState)hostRows(latestState);};
+function renderSnmpStatus(){const d=latestState?.devices.find(d=>String(d.id)===$('snmp-host').value);$('snmp-status').textContent=d?.snmp_configured?`Credentials configured: SNMP v${d.snmp_version}. Submit new values to replace them.`:'No credentials configured for this host.';}
+$('snmp-host').onchange=renderSnmpStatus;
+$('snmp-version').onchange=()=>{const v3=$('snmp-version').value==='3';$('snmp-v2').hidden=v3;$('snmp-v3').hidden=!v3;$('snmp-form').elements.community.required=!v3;for(const name of ['username','auth_password','priv_password'])$('snmp-form').elements[name].required=v3;};
+$('service-template').onchange=()=>{const f=$('service-form').elements,t=$('service-template').value;const templates={tcp:['TCP port','tcp',22,''],ssh:['SSH','tcp',22,''],http:['Web HTTP','http',80,''],https:['Web HTTPS','https',443,''],uptime:['SNMP uptime','snmp',161,'1.3.6.1.2.1.1.3.0'],sysname:['SNMP system name','snmp',161,'1.3.6.1.2.1.1.5.0'],snmp:['SNMP metric','snmp',161,'']};const [name,kind,port,oid]=templates[t];f.name.value=name;f.kind.value=kind;f.port.value=port;f.oid.value=oid;f.warning.value='';f.critical.value='';};
+$('service-template').onchange();
+async function refresh(){if(!csrf)return;try{const s=await request('/api/state');latestState=s;$('health').textContent=s.engine.status==='running'?'Nagios Core connected':'Engine needs attention';
 const subnetInput=$('discovery-form').elements.subnet;if(subnetInput.dataset.initialized!=='true'){subnetInput.value=s.discovery_subnet||'';subnetInput.dataset.initialized='true';}
 $('discovery-status').textContent=s.discovery_subnet?'Discovery enabled: '+s.discovery_subnet:'Discovery disabled';
 const progress=s.discovery_progress;if(progress)$('scan-progress').textContent=`Scan ${progress.status}: ${progress.checked.toLocaleString()} / ${progress.total.toLocaleString()} addresses checked · ${progress.found} responding`+(progress.error?' · '+progress.error:'');
-$('summary').innerHTML=[['Total devices',s.devices.length],['Online',s.devices.filter(d=>d.status==='up').length],['Offline',s.devices.filter(d=>d.status==='down').length],['Connections',s.links.length]].map(([k,v])=>`<div class="stat">${k}<strong>${v}</strong></div>`).join('');
-$('devices').innerHTML=s.devices.map(d=>`<tr><td>${esc(d.name)}</td><td>${esc(d.ip)}</td><td>${esc(d.kind)}<br>${esc(d.brand)} ${esc(d.model)}</td><td class="${esc(d.status)}">${esc(d.status)}</td><td>${d.latency==null?'—':d.latency+' ms'}</td><td>${date(d.checked_at)}</td><td><button data-device="${d.id}">Remove</button></td></tr>`).join('')||'<tr><td colspan="7">No devices yet. Open Add / Discover devices to scan a subnet or add multiple addresses.</td></tr>';
-for(const id of ['source','target']){const prev=$(id).value;$(id).innerHTML=s.devices.map(d=>`<option value="${d.id}">${esc(d.name)}</option>`).join('');if(s.devices.some(d=>String(d.id)===prev))$(id).value=prev;}
-$('events').innerHTML=s.events.map(e=>`<div class="event"><span class="${esc(e.status)}">${esc(e.status.toUpperCase())}</span> · ${esc(e.name)} · ${date(e.created_at)}</div>`).join('')||'<p>No status changes recorded yet.</p>';
-renderTopology(s);
+for(const id of ['source','target','service-host','snmp-host']){const prev=$(id).value;$(id).innerHTML=s.devices.map(d=>`<option value="${d.id}">${esc(d.name)} (${esc(d.ip)})</option>`).join('');if(s.devices.some(d=>String(d.id)===prev))$(id).value=prev;}
+renderOperations(s);renderSnmpStatus();renderTopology(s);
+$('events').innerHTML=s.events.map(e=>`<div class="event">${badge(e.status,e.state_type)} · ${esc(e.name)}${e.service_name?' / '+esc(e.service_name):''} · ${date(e.created_at)}<p>${esc(e.output)}</p></div>`).join('')||'<p>No state changes recorded yet.</p>';
 $('links').innerHTML=s.links.map(l=>`<button data-link="${l.id}">Remove link: ${esc(l.label||l.id)}</button>`).join('');
 }catch(e){$('health').textContent='Connection lost';$('message').textContent=e.message;}}
-for(const [id,path] of [['discovery-form','/api/discovery'],['device-form','/api/devices'],['link-form','/api/links']])$(id).onsubmit=async e=>{e.preventDefault();try{await mutate(path,Object.fromEntries(new FormData(e.target)));if(id!=='discovery-form')e.target.reset();$('message').textContent=id==='discovery-form'?'Discovery settings saved. Scan starts in the background; next scan runs 5 minutes after completion.':'Saved';}catch(e){$('message').textContent=e.message;}};
-function showView(view){
- for(const name of ['dashboard','topology','manage'])$('view-'+name).hidden=name!==view;
- document.querySelectorAll('.tabs button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));
-}
+function resetDeviceForm(){$('device-form').reset();$('device-form').elements.id.value='';$('device-title').textContent='Add device';$('device-save').textContent='Add device';$('cancel-edit').hidden=true;}
+$('cancel-edit').onclick=resetDeviceForm;
+for(const [id,path] of [['discovery-form','/api/discovery'],['device-form','/api/devices'],['link-form','/api/links'],['service-form','/api/services'],['snmp-form','/api/snmp']])$(id).onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{const data=Object.fromEntries(new FormData(e.target));await mutate(id==='device-form'&&data.id?'/api/update-device':path,data);if(id==='device-form')resetDeviceForm();else if(id==='snmp-form'){for(const name of ['community','username','auth_password','priv_password'])e.target.elements[name].value='';}else if(id!=='discovery-form'){e.target.reset();if(id==='service-form')$('service-template').onchange();}$('message').textContent=id==='discovery-form'?'Discovery settings saved; scan runs in the background.':'Saved';}catch(error){$('message').textContent=error.message;}finally{b.disabled=false;}};
+function showView(view){for(const name of ['dashboard','problems','services','topology','manage'])$('view-'+name).hidden=name!==view;document.querySelectorAll('.tabs button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.view===view)));}
 $('bulk-form').onsubmit=async e=>{
  e.preventDefault();const button=e.target.querySelector('button');
  const addresses=[...new Set(e.target.elements.addresses.value.split(/[\s,;]+/).filter(Boolean))];
@@ -25,12 +47,11 @@ $('bulk-form').onsubmit=async e=>{
  if(addresses.some(ip=>!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)||ip.split('.').some(n=>Number(n)>255))){$('message').textContent='Enter valid IPv4 addresses only. Nothing was added.';return;}
  button.disabled=true;let added=0,skipped=0;const failed=[];
  try{
-  const stateResponse=await fetch('/api/state');if(!stateResponse.ok)throw Error('Cannot read inventory');
-  const state=await stateResponse.json();const existing=new Set(state.devices.map(d=>d.ip));
+  const state=await request('/api/state');const existing=new Set(state.devices.map(d=>d.ip));
   for(const ip of addresses){
    if(existing.has(ip)){skipped++;continue;}
    $('message').textContent=`Adding devices: ${added+skipped+failed.length+1}/${addresses.length}`;
-   const r=await fetch('/api/devices',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:ip,ip,kind:'other'})});
+   const r=await fetch('/api/devices',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify({name:ip,ip,kind:'other'})});
    if(r.ok){added++;existing.add(ip);}else{const body=await r.json();failed.push(ip+': '+body.error);}
   }
   await refresh();$('message').textContent=`Added ${added}; already present ${skipped}; failed ${failed.length}.`+(failed.length?' '+failed.join('; '):'');
@@ -38,7 +59,14 @@ $('bulk-form').onsubmit=async e=>{
  }catch(error){$('message').textContent=`Added ${added} before stopping: ${error.message}. You can retry; existing devices will be skipped.`;}
  finally{button.disabled=false;}
 };
-document.addEventListener('click',async e=>{const d=e.target.dataset;if(d.view){showView(d.view);return;}try{if(d.device&&confirm('Remove this device and its history?'))await mutate('/api/delete-device',{id:d.device});if(d.link)await mutate('/api/delete-link',{id:d.link});}catch(e){$('message').textContent=e.message;}});
+document.addEventListener('click',async e=>{const d=e.target.dataset;if(d.view){showView(d.view);return;}try{
+if(d.device&&confirm('Remove this host, its services and history?'))await mutate('/api/delete-device',{id:d.device});
+if(d.service&&confirm('Remove this service and its history?'))await mutate('/api/delete-service',{id:d.service});
+if(d.link)await mutate('/api/delete-link',{id:d.link});
+if(d.ack){const note=prompt('Acknowledgement note:');if(note)await mutate('/api/acknowledge',{id:d.ack,target:d.target,note});}
+if(d.maintenance)await mutate('/api/maintenance',{id:d.maintenance,minutes:d.minutes});
+if(d.edit){const host=latestState.devices.find(h=>String(h.id)===d.edit);const f=$('device-form').elements;for(const name of ['id','name','ip','kind','brand','model','group_name'])f[name].value=host[name];$('device-title').textContent='Edit device';$('device-save').textContent='Save changes';$('cancel-edit').hidden=false;showView('manage');$('device-title').scrollIntoView({block:'center'});}
+}catch(error){$('message').textContent=error.message;}});
 let topologyKey='', topologyBounds={width:1000,height:600}, camera={x:0,y:0,width:1000,height:600};
 function setCamera(){ $('topology').setAttribute('viewBox',`${camera.x} ${camera.y} ${camera.width} ${camera.height}`); }
 function fitTopology(){camera={x:0,y:0,width:topologyBounds.width,height:topologyBounds.height};setCamera();}
@@ -86,4 +114,6 @@ $('topology').onpointermove=e=>{if(!drag)return;const box=$('topology').getBound
 $('topology').onpointerup=$('topology').onpointercancel=()=>{drag=null;};
 $('topology').addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target.closest('[data-node]')){e.preventDefault();e.target.dispatchEvent(new MouseEvent('click',{bubbles:true}));}});
 
-refresh();setInterval(refresh,5000);
+
+request('/api/session').then(session=>session.authenticated?signedIn(session):showLogin()).catch(()=>showLogin());
+setInterval(refresh,5000);

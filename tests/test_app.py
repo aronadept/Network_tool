@@ -1,3 +1,4 @@
+import http.cookiejar
 import json
 import tempfile
 import threading
@@ -8,34 +9,43 @@ from pathlib import Path
 from unittest.mock import patch
 import app
 
-class Workflow(unittest.TestCase):
+class ApiTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.old=app.DB
         app.DB=Path(self.tmp.name)/'test.db'
         app.initialize()
+        app.create_admin('tester','Test-only-password-123')
+        self.csrf=''
+        self.opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         self.server=app.ThreadingHTTPServer(('127.0.0.1',0),app.Handler)
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True)
         self.thread.start()
         self.url='http://127.0.0.1:'+str(self.server.server_port)
+        self.csrf=self.post('/api/login',{'username':'tester','password':'Test-only-password-123'})['csrf']
     def tearDown(self):
         self.server.shutdown();self.server.server_close();self.thread.join()
         app.DB=self.old;self.tmp.cleanup()
     def post(self,path,data):
-        req=urllib.request.Request(self.url+path,json.dumps(data).encode(),{'Content-Type':'application/json'})
-        with urllib.request.urlopen(req) as r:return json.load(r)
+        req=urllib.request.Request(self.url+path,json.dumps(data).encode(),{'Content-Type':'application/json','X-CSRF-Token':self.csrf})
+        with self.opener.open(req) as r:return json.load(r)
     def state(self):
-        with urllib.request.urlopen(self.url+'/api/state') as r:return json.load(r)
+        with self.opener.open(self.url+'/api/state') as r:return json.load(r)
+
+class Workflow(ApiTestCase):
     def test_inventory_monitor_topology_and_delete(self):
         self.post('/api/devices',{'name':'Router','ip':'127.0.0.1','kind':'router'})
         self.post('/api/devices',{'name':'Switch','ip':'192.168.1.2','kind':'switch'})
-        with patch('app.probe',return_value=('up',1.25)):app.poll_once();app.poll_once()
+        for d in self.state()['devices']:
+            app.record_result('devices',d['id'],'OK','Ping responding: 1.25 ms',100,1,'HARD')
+            app.record_result('devices',d['id'],'OK','Ping responding: 1.25 ms',100,1,'HARD')
         s=self.state();self.assertEqual(len(s['events']),2)
         self.assertTrue(all(d['status']=='up' for d in s['devices']))
         a,b=[d['id'] for d in s['devices']]
         self.post('/api/links',{'source':a,'target':b,'label':'uplink'})
         self.assertEqual(self.state()['links'][0]['label'],'uplink')
-        with patch('app.probe',return_value=('down',None)):app.poll_once()
+        for d in self.state()['devices']:
+            app.record_result('devices',d['id'],'CRITICAL','No ICMP response',200,3,'HARD')
         self.assertEqual(len(self.state()['events']),4)
         self.post('/api/delete-device',{'id':a})
         self.assertEqual(len(self.state()['devices']),1)

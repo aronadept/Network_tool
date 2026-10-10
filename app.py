@@ -1,15 +1,24 @@
-"""Small intranet monitor. Bind to loopback; use an authenticated reverse proxy remotely."""
+"""Network Monitor web/API layer backed by Nagios Core."""
+import atexit
 import concurrent.futures
+import hashlib
 import ipaddress
 import json
+import math
 import os
+import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
 import threading
 import time
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
+import engine
+from security import password_hash, password_matches, encrypt_credentials
 
 DB = Path(os.environ.get('NETWORK_DB', 'data/network.db'))
 DISCOVERY_WORKERS = max(1, min(64, int(os.environ.get('DISCOVERY_WORKERS', '32'))))
@@ -17,12 +26,19 @@ DISCOVERY_WAKE = threading.Event()
 DISCOVERY_LOCK = threading.Lock()
 DISCOVERY_GENERATION = 0
 DISCOVERY_PROGRESS = {'status': 'idle', 'checked': 0, 'total': 0, 'found': 0, 'subnet': None}
-
 INTERVAL = max(10, int(os.environ.get('POLL_INTERVAL', '30')))
+LOGIN_LOCK = threading.Lock()
+LOGIN_ATTEMPTS = {}
 
 
 def connect():
-    DB.parent.mkdir(parents=True, exist_ok=True)
+    DB.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        descriptor = os.open(DB, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(descriptor)
     conn = sqlite3.connect(DB, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
@@ -31,12 +47,12 @@ def connect():
 
 def initialize():
     with connect() as conn:
-        conn.executescript('''
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.executescript("""
         CREATE TABLE IF NOT EXISTS discovery (id INTEGER PRIMARY KEY CHECK(id=1), subnet TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS devices (
           id INTEGER PRIMARY KEY, name TEXT NOT NULL, ip TEXT NOT NULL UNIQUE,
-          kind TEXT NOT NULL, brand TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'unknown',
-          latency REAL, checked_at REAL);
+          kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unknown', latency REAL, checked_at REAL);
         CREATE TABLE IF NOT EXISTS links (
           id INTEGER PRIMARY KEY, source INTEGER REFERENCES devices(id) ON DELETE CASCADE,
           target INTEGER REFERENCES devices(id) ON DELETE CASCADE, label TEXT NOT NULL,
@@ -44,39 +60,102 @@ def initialize():
         CREATE TABLE IF NOT EXISTS events (
           id INTEGER PRIMARY KEY, device_id INTEGER REFERENCES devices(id) ON DELETE CASCADE,
           status TEXT NOT NULL, created_at REAL NOT NULL);
-        ''')
+        CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER REFERENCES users(id) ON DELETE CASCADE, csrf TEXT NOT NULL, expires_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS services (
+          id INTEGER PRIMARY KEY, device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+          name TEXT NOT NULL, kind TEXT NOT NULL, port INTEGER NOT NULL, path TEXT NOT NULL DEFAULT '/',
+          oid TEXT NOT NULL DEFAULT '', warning REAL, critical REAL, timeout INTEGER NOT NULL DEFAULT 3,
+          interval INTEGER NOT NULL DEFAULT 60, max_attempts INTEGER NOT NULL DEFAULT 3,
+          state TEXT NOT NULL DEFAULT 'PENDING', state_type TEXT NOT NULL DEFAULT 'SOFT',
+          attempts INTEGER NOT NULL DEFAULT 0, output TEXT NOT NULL DEFAULT 'Waiting for first check',
+          checked_at REAL, acknowledged INTEGER NOT NULL DEFAULT 0, ack_note TEXT NOT NULL DEFAULT '',
+          UNIQUE(device_id,name));
+        """)
+        columns = {r['name'] for r in conn.execute('PRAGMA table_info(devices)')}
+        additions = {'brand':"TEXT NOT NULL DEFAULT ''", 'model':"TEXT NOT NULL DEFAULT ''",
+          'group_name':"TEXT NOT NULL DEFAULT 'Network'", 'snmp_secret':"TEXT NOT NULL DEFAULT ''",
+          'snmp_version':"TEXT NOT NULL DEFAULT ''", 'state':"TEXT NOT NULL DEFAULT 'PENDING'",
+          'state_type':"TEXT NOT NULL DEFAULT 'SOFT'", 'attempts':'INTEGER NOT NULL DEFAULT 0',
+          'output':"TEXT NOT NULL DEFAULT 'Waiting for Nagios check'", 'acknowledged':'INTEGER NOT NULL DEFAULT 0',
+          'ack_note':"TEXT NOT NULL DEFAULT ''", 'maintenance_until':'REAL NOT NULL DEFAULT 0'}
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(f'ALTER TABLE devices ADD COLUMN {name} {definition}')
+        event_columns = {r['name'] for r in conn.execute('PRAGMA table_info(events)')}
+        for name, definition in {'service_id':'INTEGER REFERENCES services(id) ON DELETE CASCADE',
+                                  'output':"TEXT NOT NULL DEFAULT ''", 'state_type':"TEXT NOT NULL DEFAULT 'HARD'"}.items():
+            if name not in event_columns:
+                conn.execute(f'ALTER TABLE events ADD COLUMN {name} {definition}')
+    os.chmod(DB, 0o600)
+
+
+def create_admin(username, password):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,40}', username):
+        raise ValueError('Username must be 1–40 letters, digits, dots, underscores or hyphens')
+    hashed = password_hash(password)
+    with connect() as conn:
+        conn.execute('INSERT INTO users(username,password_hash) VALUES(?,?) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash', (username, hashed))
+        user = conn.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone()
+        conn.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
+
+
+def record_result(table, identifier, state, output, checked_at, attempts, state_type):
+    if table not in ('devices','services'):
+        raise ValueError('Invalid result table')
+    with connect() as conn:
+        previous = conn.execute(f'SELECT * FROM {table} WHERE id=?', (identifier,)).fetchone()
+        if not previous or (previous['checked_at'] and checked_at <= previous['checked_at']):
+            return
+        changed = previous['state'] != state or previous['state_type'] != state_type
+        reset_ack = previous['state'] != state or state == 'OK'
+        conn.execute(f'UPDATE {table} SET state=?,output=?,checked_at=?,attempts=?,state_type=?,acknowledged=?,ack_note=? WHERE id=?',
+          (state,output,checked_at,attempts,state_type,0 if reset_ack else previous['acknowledged'],
+           '' if reset_ack else previous['ack_note'],identifier))
+        if table == 'devices':
+            status = {'OK':'up','CRITICAL':'down','UNKNOWN':'unavailable'}.get(state, 'unknown')
+            latency = re.search(r'Ping responding: ([\d.]+) ms', output)
+            conn.execute('UPDATE devices SET status=?,latency=? WHERE id=?', (status,float(latency.group(1)) if latency else None,identifier))
+        if changed:
+            conn.execute('INSERT INTO events(device_id,service_id,status,created_at,output,state_type) VALUES(?,?,?,?,?,?)',
+              (identifier if table=='devices' else previous['device_id'], None if table=='devices' else identifier,state,checked_at,output,state_type))
+            conn.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 10000)')
 
 
 def probe(address):
     if not shutil.which('ping'):
         return 'unavailable', None
-    result = subprocess.run(['ping', '-n', '-c', '1', '-W', '2', address],
-                            capture_output=True, text=True, timeout=5)
-    import re
+    result = subprocess.run(['ping', '-n', '-c', '1', '-W', '2', address], capture_output=True, text=True, timeout=5)
     match = re.search(r'time[=<]([\d.]+)', result.stdout)
-    return ('up' if result.returncode == 0 else 'down',
-            float(match.group(1)) if match else None)
+    return ('up' if result.returncode == 0 else 'down', float(match.group(1)) if match else None)
 
 
-def poll_once():
-    with connect() as conn:
-        devices = conn.execute('SELECT * FROM devices').fetchall()
-    for device in devices:
-        try:
-            status, latency = probe(device['ip'])
-        except (OSError, subprocess.TimeoutExpired):
-            status, latency = 'unavailable', None
-        with connect() as conn:
-            current = conn.execute('SELECT status FROM devices WHERE id=?', (device['id'],)).fetchone()
-            if current is None:
-                continue
-            now = time.time()
-            if current['status'] != status:
-                conn.execute('INSERT INTO events(device_id,status,created_at) VALUES(?,?,?)',
-                             (device['id'], status, now))
-            conn.execute('UPDATE devices SET status=?,latency=?,checked_at=? WHERE id=?',
-                         (status, latency, now, device['id']))
-            conn.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 10000)')
+def short_text(value, name, required=False, limit=80):
+    value = str(value or '').strip()
+    if len(value) > limit or (required and not value) or any(ord(c)<32 for c in value):
+        raise ValueError(f'Invalid {name}')
+    return value
+
+
+def service_values(data):
+    kind = data.get('kind')
+    if kind not in ('tcp','http','https','snmp'):
+        raise ValueError('Choose TCP, HTTP, HTTPS or SNMP')
+    port = int(data.get('port') or {'tcp':22,'http':80,'https':443,'snmp':161}[kind])
+    interval, timeout, retries = int(data.get('interval',60)), int(data.get('timeout',3)), int(data.get('max_attempts',3))
+    if not 1<=port<=65535 or not 10<=interval<=86400 or not 1<=timeout<=10 or not 1<=retries<=10:
+        raise ValueError('Invalid port, interval, timeout or retry count')
+    path = short_text(data.get('path') or '/', 'HTTP path', limit=500)
+    if not path.startswith('/') or path.startswith('//') or any(c.isspace() for c in path):
+        raise ValueError('HTTP path must be a local path such as /health')
+    oid = short_text(data.get('oid'), 'OID', limit=160).lstrip('.')
+    if kind == 'snmp' and not re.fullmatch(r'[0-2](?:\.\d+){2,}', oid):
+        raise ValueError('Supply a numeric SNMP OID')
+    warning = float(data['warning']) if data.get('warning') not in ('',None) else None
+    critical = float(data['critical']) if data.get('critical') not in ('',None) else None
+    if any(v is not None and not math.isfinite(v) for v in (warning,critical)) or (warning is not None and critical is not None and warning>=critical):
+        raise ValueError('Thresholds must be finite and warning must be below critical')
+    return (int(data['device_id']), short_text(data.get('name'),'service name',True),kind,port,path,oid,warning,critical,timeout,interval,retries)
 
 
 def discovery_network(subnet):
@@ -112,8 +191,10 @@ def discover(subnet, cancelled=lambda: False):
                     break
                 if status == 'up':
                     with connect() as conn:
-                        conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')",
+                        result = conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')",
                                      ('Discovered ' + address, address))
+                        if result.rowcount:
+                            engine.WAKE.set()
                 with DISCOVERY_LOCK:
                     DISCOVERY_PROGRESS['checked'] += 1
                     DISCOVERY_PROGRESS['found'] += int(status == 'up')
@@ -146,89 +227,195 @@ def discovery_loop():
         DISCOVERY_WAKE.wait(300)
 
 
-def monitor():
-    while True:
-        try:
-            poll_once()
-        except sqlite3.Error:
-            import logging
-            logging.exception('Monitoring cycle failed')
-        time.sleep(INTERVAL)
-
-
 class Handler(BaseHTTPRequestHandler):
-    def respond(self, status, body, content_type='application/json'):
+    def respond(self, status, body, content_type='application/json', cookie=None):
         data = json.dumps(body).encode() if content_type == 'application/json' else body
         self.send_response(status)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('X-Content-Type-Options', 'nosniff')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+        if cookie:
+            self.send_header('Set-Cookie', cookie)
         self.end_headers()
         self.wfile.write(data)
 
+    def cookie(self, token, age=43200):
+        secure = '; Secure' if os.environ.get('COOKIE_SECURE') == '1' else ''
+        return f'network_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={age}{secure}'
+
+    def session(self):
+        cookie = SimpleCookie()
+        try:
+            cookie.load(self.headers.get('Cookie',''))
+            token = cookie['network_session'].value
+        except (KeyError, ValueError, CookieError):
+            return None
+        hashed = hashlib.sha256(token.encode()).hexdigest()
+        with connect() as conn:
+            return conn.execute('SELECT s.*,u.username FROM sessions s JOIN users u ON u.id=s.user_id WHERE token_hash=? AND expires_at>?', (hashed,time.time())).fetchone()
+
     def do_GET(self):
+        if self.path == '/api/session':
+            session = self.session()
+            self.respond(200, {'authenticated':bool(session),'username':session['username'] if session else None,'csrf':session['csrf'] if session else None})
+            return
         if self.path == '/api/state':
+            if not self.session():
+                self.respond(401, {'error':'Please sign in'})
+                return
             with connect() as conn:
-                devices = [dict(r) for r in conn.execute('SELECT * FROM devices ORDER BY name')]
+                devices = []
+                for row in conn.execute('SELECT * FROM devices ORDER BY name'):
+                    d = dict(row)
+                    d['snmp_configured'] = bool(d.pop('snmp_secret'))
+                    devices.append(d)
+                services = [dict(r) for r in conn.execute('SELECT s.*,d.name AS host_name,d.ip,d.maintenance_until FROM services s JOIN devices d ON d.id=s.device_id ORDER BY d.name,s.name')]
                 links = [dict(r) for r in conn.execute('SELECT * FROM links')]
                 config = conn.execute('SELECT subnet FROM discovery WHERE id=1').fetchone()
-                events = [dict(r) for r in conn.execute('SELECT e.*,d.name FROM events e JOIN devices d ON d.id=e.device_id ORDER BY e.id DESC LIMIT 100')]
+                events = [dict(r) for r in conn.execute('SELECT e.*,d.name,s.name AS service_name FROM events e JOIN devices d ON d.id=e.device_id LEFT JOIN services s ON s.id=e.service_id ORDER BY e.id DESC LIMIT 100')]
             with DISCOVERY_LOCK:
                 progress = dict(DISCOVERY_PROGRESS)
-            self.respond(200, dict(discovery_progress=progress, devices=devices, links=links, events=events,
-                                   discovery_subnet=config['subnet'] if config else None, ping_available=bool(shutil.which('ping')), interval=INTERVAL))
+            with engine.LOCK:
+                health = dict(engine.HEALTH)
+            self.respond(200, dict(devices=devices,services=services,links=links,events=events,engine=health,
+                                   discovery_progress=progress,discovery_subnet=config['subnet'] if config else None,
+                                   ping_available=bool(shutil.which('ping')),interval=INTERVAL))
         elif self.path in ('/', '/app.js', '/style.css'):
             name = 'index.html' if self.path == '/' else self.path[1:]
-            mime = {'index.html': 'text/html; charset=utf-8', 'app.js': 'text/javascript', 'style.css': 'text/css'}[name]
-            self.respond(200, (Path(__file__).parent / 'web' / name).read_bytes(), mime)
+            mime = {'index.html':'text/html; charset=utf-8','app.js':'text/javascript','style.css':'text/css'}[name]
+            self.respond(200,(Path(__file__).parent/'web'/name).read_bytes(),mime)
         else:
-            self.respond(404, {'error': 'Not found'})
+            self.respond(404, {'error':'Not found'})
+
+    def login(self, data):
+        address = self.client_address[0]
+        now = time.time()
+        with LOGIN_LOCK:
+            for key in list(LOGIN_ATTEMPTS):
+                if LOGIN_ATTEMPTS[key][1] < now:
+                    del LOGIN_ATTEMPTS[key]
+            count, expires = LOGIN_ATTEMPTS.get(address,(0,now+300))
+            if count >= 10:
+                self.respond(429, {'error':'Too many login attempts; retry after 5 minutes'})
+                return
+            LOGIN_ATTEMPTS[address] = (count+1,expires)
+        with connect() as conn:
+            user = conn.execute('SELECT * FROM users WHERE username=?',(str(data.get('username','')),)).fetchone()
+            # A dummy hash keeps unknown users on the same costly verification path.
+            valid = password_matches(data.get('password',''),user['password_hash'] if user else DUMMY_HASH)
+            if not user or not valid:
+                self.respond(401, {'error':'Invalid username or password'})
+                return
+            token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+            conn.execute('DELETE FROM sessions WHERE expires_at<?', (now,))
+            conn.execute('INSERT INTO sessions(token_hash,user_id,csrf,expires_at) VALUES(?,?,?,?)',
+                         (hashlib.sha256(token.encode()).hexdigest(),user['id'],csrf,now+43200))
+        with LOGIN_LOCK:
+            LOGIN_ATTEMPTS.pop(address,None)
+        self.respond(200, {'ok':True,'username':user['username'],'csrf':csrf},cookie=self.cookie(token))
 
     def do_POST(self):
-        # Reject browser requests originating from another website.
-        if self.headers.get('Origin') and self.headers['Origin'] != 'http://' + self.headers.get('Host', ''):
-            self.respond(403, {'error': 'Origin rejected'})
+        origin = self.headers.get('Origin')
+        expected = os.environ.get('PUBLIC_ORIGIN') or 'http://' + self.headers.get('Host','')
+        if origin and origin != expected:
+            self.respond(403, {'error':'Origin rejected'})
             return
         try:
-            length = int(self.headers.get('Content-Length', '0'))
-            if not 0 < length <= 4096:
+            length = int(self.headers.get('Content-Length','0'))
+            if not 0 < length <= 8192:
                 raise ValueError('Invalid request size')
             data = json.loads(self.rfile.read(length))
-            if not isinstance(data, dict):
+            if not isinstance(data,dict):
                 raise ValueError('Expected an object')
+            if self.path == '/api/login':
+                self.login(data)
+                return
+            session = self.session()
+            if not session:
+                self.respond(401, {'error':'Please sign in'})
+                return
+            if not secrets.compare_digest(self.headers.get('X-CSRF-Token',''),session['csrf']):
+                self.respond(403, {'error':'Invalid session token; reload the page'})
+                return
+            if self.path == '/api/logout':
+                with connect() as conn:
+                    conn.execute('DELETE FROM sessions WHERE token_hash=?',(session['token_hash'],))
+                self.respond(200, {'ok':True},cookie=self.cookie('',0))
+                return
+            reload_engine = False
             with connect() as conn:
                 if self.path == '/api/discovery':
-                    subnet = str(data.get('subnet', '')).strip()
+                    subnet = str(data.get('subnet','')).strip()
                     if subnet:
                         network = discovery_network(subnet)
                         if not shutil.which('ping'):
                             raise ValueError('Install iputils-ping before enabling discovery')
-                        conn.execute('INSERT OR REPLACE INTO discovery(id,subnet) VALUES(1,?)', (str(network),))
+                        conn.execute('INSERT OR REPLACE INTO discovery(id,subnet) VALUES(1,?)',(str(network),))
                     else:
                         conn.execute('DELETE FROM discovery')
-                elif self.path == '/api/devices':
-                    address = str(ipaddress.ip_address(data.get('ip', '')))
+                elif self.path in ('/api/devices','/api/update-device'):
+                    address = str(ipaddress.ip_address(data.get('ip','')))
                     if ipaddress.ip_address(address).version != 4:
-                        raise ValueError('This version supports IPv4 addresses')
-                    name = str(data.get('name', '')).strip()
-                    kind = data.get('kind', 'other')
-                    if not name or len(name) > 80 or kind not in ('switch','ap','firewall','router','server','other'):
-                        raise ValueError('Provide a device name and valid type')
-                    brand = str(data.get('brand', '')).strip()
-                    model = str(data.get('model', '')).strip()
-                    if len(brand) > 80 or len(model) > 80:
-                        raise ValueError('Brand and model must be at most 80 characters')
-                    conn.execute('INSERT INTO devices(name,ip,kind,brand,model) VALUES(?,?,?,?,?)', (name,address,kind,brand,model))
+                        raise ValueError('Use an IPv4 address')
+                    kind = data.get('kind','other')
+                    if kind not in ('switch','ap','firewall','router','server','other'):
+                        raise ValueError('Invalid device type')
+                    values = (short_text(data.get('name'),'device name',True),address,kind,
+                              short_text(data.get('brand'),'brand'),short_text(data.get('model'),'model'),
+                              short_text(data.get('group_name') or 'Network','group',True))
+                    if self.path == '/api/devices':
+                        conn.execute('INSERT INTO devices(name,ip,kind,brand,model,group_name) VALUES(?,?,?,?,?,?)',values)
+                    else:
+                        cursor = conn.execute('UPDATE devices SET name=?,ip=?,kind=?,brand=?,model=?,group_name=? WHERE id=?',values+(int(data['id']),))
+                        if not cursor.rowcount:
+                            raise ValueError('Device not found')
+                    reload_engine = True
+                elif self.path == '/api/services':
+                    conn.execute('INSERT INTO services(device_id,name,kind,port,path,oid,warning,critical,timeout,interval,max_attempts) VALUES(?,?,?,?,?,?,?,?,?,?,?)',service_values(data))
+                    reload_engine = True
+                elif self.path == '/api/delete-service':
+                    conn.execute('DELETE FROM services WHERE id=?',(int(data['id']),))
+                    reload_engine = True
+                elif self.path == '/api/snmp':
+                    identifier = int(data['device_id'])
+                    if not conn.execute('SELECT id FROM devices WHERE id=?',(identifier,)).fetchone():
+                        raise ValueError('Host not found')
+                    version = data.get('version')
+                    if version not in ('2c','3'):
+                        raise ValueError('Choose SNMP v2c or v3')
+                    credentials = {'version':version}
+                    names = ('community',) if version == '2c' else ('username','auth_password','priv_password')
+                    for name in names:
+                        credentials[name] = short_text(data.get(name), name,True,256)
+                    if version == '3' and (len(credentials['auth_password'])<8 or len(credentials['priv_password'])<8):
+                        raise ValueError('SNMPv3 passphrases require at least 8 characters')
+                    conn.execute('UPDATE devices SET snmp_secret=?,snmp_version=? WHERE id=?',
+                                 (encrypt_credentials(DB,credentials),version,identifier))
+                elif self.path == '/api/acknowledge':
+                    table = 'services' if data.get('target') == 'service' else 'devices'
+                    identifier = int(data['id'])
+                    row = conn.execute(f'SELECT * FROM {table} WHERE id=?',(identifier,)).fetchone()
+                    if not row or row['state'] in ('OK','PENDING'):
+                        raise ValueError('No active problem to acknowledge')
+                    note = short_text(data.get('note'), 'acknowledgement note',True,300)
+                    conn.execute(f'UPDATE {table} SET acknowledged=1,ack_note=? WHERE id=?',(note,identifier))
+                elif self.path == '/api/maintenance':
+                    minutes = int(data.get('minutes',60))
+                    if not 0<=minutes<=10080:
+                        raise ValueError('Maintenance must be 0 to 10080 minutes')
+                    cursor = conn.execute('UPDATE devices SET maintenance_until=? WHERE id=?',(time.time()+minutes*60 if minutes else 0,int(data['id'])))
+                    if not cursor.rowcount:
+                        raise ValueError('Host not found')
                 elif self.path == '/api/links':
-                    label = str(data.get('label', '')).strip()
-                    if len(label) > 80:
-                        raise ValueError('Link label is too long')
                     conn.execute('INSERT INTO links(source,target,label) VALUES(?,?,?)',
-                                 (int(data['source']),int(data['target']),label))
+                                 (int(data['source']),int(data['target']),short_text(data.get('label'),'link label')))
                 elif self.path == '/api/delete-device':
-                    conn.execute('DELETE FROM devices WHERE id=?', (int(data['id']),))
+                    conn.execute('DELETE FROM devices WHERE id=?',(int(data['id']),))
+                    reload_engine = True
                 elif self.path == '/api/delete-link':
-                    conn.execute('DELETE FROM links WHERE id=?', (int(data['id']),))
+                    conn.execute('DELETE FROM links WHERE id=?',(int(data['id']),))
                 else:
                     self.respond(404, {'error':'Not found'})
                     return
@@ -237,15 +424,48 @@ class Handler(BaseHTTPRequestHandler):
                 with DISCOVERY_LOCK:
                     DISCOVERY_GENERATION += 1
                 DISCOVERY_WAKE.set()
-            self.respond(201, {'ok': True})
-        except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as exc:
-            self.respond(400, {'error': str(exc)})
+            if reload_engine:
+                engine.WAKE.set()
+            self.respond(201, {'ok':True})
+        except (ValueError,KeyError,TypeError,sqlite3.IntegrityError) as exc:
+            self.respond(400, {'error':str(exc)})
+        except sqlite3.Error:
+            self.respond(503, {'error':'Database operation failed; try again'})
 
+
+DUMMY_HASH = password_hash(secrets.token_urlsafe(32))
 
 if __name__ == '__main__':
+    import argparse
+    import getpass
+    parser = argparse.ArgumentParser(description='Network Monitor powered by Nagios Core')
+    parser.add_argument('command',nargs='?',choices=['serve','create-admin'],default='serve')
+    parser.add_argument('--username',default='admin')
+    args = parser.parse_args()
     initialize()
-    threading.Thread(target=monitor, daemon=True).start()
-    threading.Thread(target=discovery_loop, daemon=True).start()
-    server = ThreadingHTTPServer((os.environ.get('HOST', '127.0.0.1'), int(os.environ.get('PORT', '8080'))), Handler)
-    print('Network monitor listening on', server.server_address, flush=True)
-    server.serve_forever()
+    if args.command == 'create-admin':
+        password = getpass.getpass('New admin password (at least 12 characters): ')
+        if password != getpass.getpass('Repeat password: '):
+            parser.error('Passwords do not match')
+        create_admin(args.username,password)
+        print('Admin account saved. Run app.py to start the server.')
+    else:
+        with connect() as conn:
+            if not conn.execute('SELECT id FROM users LIMIT 1').fetchone():
+                parser.error('Create an account first: python app.py create-admin')
+        threading.Thread(target=engine.loop,args=(DB,),daemon=True).start()
+        threading.Thread(target=discovery_loop,daemon=True).start()
+        atexit.register(engine.stop)
+        import signal
+        def shutdown_signal(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, shutdown_signal)
+        server = ThreadingHTTPServer((os.environ.get('HOST','127.0.0.1'),int(os.environ.get('PORT','8080'))),Handler)
+        print('Network Monitor listening on',server.server_address,flush=True)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+            engine.stop()

@@ -1,0 +1,20 @@
+# Example for this user's Ubuntu container. Change all aron paths/user names as needed.
+[Unit]
+Description=Network Monitor dashboard and Nagios Core engine
+After=network.target
+
+[Service]
+Type=simple
+User=aron
+Group=aron
+WorkingDirectory=/home/aron/Network_tool
+Environment=HOST=0.0.0.0
+Environment=PORT=8080
+ExecStart=/home/aron/Network_tool/.venv/bin/python /home/aron/Network_tool/app.py
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
