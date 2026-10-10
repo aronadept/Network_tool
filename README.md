@@ -4,7 +4,7 @@ Ubuntu intranet monitoring console for mixed-brand network devices. Nagios Core 
 
 ## Fresh setup with the redesigned console
 
-The interface uses a light operations workspace, persistent sidebar navigation, host/service health breakdowns, compact tables, host search/state/group filters, mobile navigation and expandable engine diagnostics. Counts and bars come from live inventory; the app does not insert demonstration devices.
+The interface uses a light operations workspace, persistent sidebar navigation, host/service health breakdowns, compact tables, host search/state/group filters, clickable column sorting (name, numeric IPv4, type, severity, latency and last check), mobile navigation and expandable engine diagnostics. Counts and bars come from live inventory; the app does not insert demonstration devices.
 
 For a clean installation, stop the running app first (Ctrl+C, or stop its systemd service). Update the branch and run as the application user, such as aron:
 

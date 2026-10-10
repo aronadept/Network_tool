@@ -11,7 +11,25 @@ $('logout').onclick=async()=>{try{await request('/api/logout',{});showLogin();}c
 const badge=(state,type='')=>`<span class="badge state-${esc(state)}">${esc(state)}</span>${type==='SOFT'&&state!=='PENDING'?' <small>retrying</small>':''}`;
 function problemsOf(s){const now=Date.now()/1000;return [...s.devices.map(d=>({...d,target:'host',host_name:d.name,check_name:'Host ping'})),...s.services.map(c=>({...c,target:'service',check_name:c.name}))].filter(c=>!['OK','PENDING'].includes(c.state)).map(c=>({...c,maintenance:c.maintenance_until>now}));}
 function ackButton(c){return c.acknowledged?'':`<button data-ack="${c.id}" data-target="${c.target}">Acknowledge</button>`;}
-function hostRows(s){const group=$('group-filter').value,query=$('host-search').value.trim().toLowerCase(),state=$('host-state').value;$('devices').innerHTML=s.devices.filter(d=>(!group||d.group_name===group)&&(!state||d.state===state)&&(!query||[d.name,d.ip,d.brand,d.model].join(' ').toLowerCase().includes(query))).map(d=>`<tr><td><strong>${esc(d.name)}</strong></td><td>${esc(d.ip)}</td><td>${esc(d.kind)}<br>${esc(d.brand)} ${esc(d.model)}<br><small>${esc(d.group_name)}</small></td><td>${badge(d.state,d.state_type)}${d.maintenance_until>Date.now()/1000?'<br><small>Maintenance</small>':''}</td><td>${d.latency==null?'—':d.latency+' ms'}</td><td>${esc(d.output)}<br><small>${date(d.checked_at)}</small></td><td class="actions"><button data-edit="${d.id}">Edit</button><button data-maintenance="${d.id}" data-minutes="${d.maintenance_until>Date.now()/1000?0:60}">${d.maintenance_until>Date.now()/1000?'End maintenance':'Maintain 1h'}</button><button data-device="${d.id}">Remove</button></td></tr>`).join('')||'<tr><td colspan="7">No matching hosts. Open Add / Discover devices to add your network.</td></tr>';}
+let hostSort={key:'name',direction:1};
+const severity={CRITICAL:0,WARNING:1,UNKNOWN:2,PENDING:3,OK:4};
+function compareHosts(a,b){
+ const key=hostSort.key;let result;
+ if(key==='latency'||key==='checked_at'){
+  const av=a[key],bv=b[key];
+  if(av==null||bv==null)return av==null?(bv==null?0:1):-1;
+  result=Number(av)-Number(bv);
+ }else if(key==='ip'){
+  const number=ip=>ip.split('.').reduce((sum,part)=>sum*256+Number(part),0);
+  result=number(a.ip)-number(b.ip);
+ }else if(key==='state')result=(severity[a.state]??5)-(severity[b.state]??5);
+ else result=String(a[key]??'').localeCompare(String(b[key]??''),undefined,{numeric:true,sensitivity:'base'});
+ return result*hostSort.direction||a.id-b.id;
+}
+function updateSortHeaders(){document.querySelectorAll('[data-host-sort]').forEach(button=>{const active=button.dataset.hostSort===hostSort.key;button.closest('th').setAttribute('aria-sort',active?(hostSort.direction===1?'ascending':'descending'):'none');button.querySelector('.sort-indicator').textContent=active?(hostSort.direction===1?'↑':'↓'):'↕';});}
+document.querySelectorAll('[data-host-sort]').forEach(button=>button.onclick=()=>{const key=button.dataset.hostSort;hostSort={key,direction:key===hostSort.key?-hostSort.direction:1};updateSortHeaders();if(latestState)hostRows(latestState);});
+updateSortHeaders();
+function hostRows(s){const group=$('group-filter').value,query=$('host-search').value.trim().toLowerCase(),state=$('host-state').value;$('devices').innerHTML=s.devices.filter(d=>(!group||d.group_name===group)&&(!state||d.state===state)&&(!query||[d.name,d.ip,d.brand,d.model].join(' ').toLowerCase().includes(query))).sort(compareHosts).map(d=>`<tr><td><strong>${esc(d.name)}</strong></td><td>${esc(d.ip)}</td><td>${esc(d.kind)}<br>${esc(d.brand)} ${esc(d.model)}<br><small>${esc(d.group_name)}</small></td><td>${badge(d.state,d.state_type)}${d.maintenance_until>Date.now()/1000?'<br><small>Maintenance</small>':''}</td><td>${d.latency==null?'—':d.latency+' ms'}</td><td>${esc(d.output)}<br><small>${date(d.checked_at)}</small></td><td class="actions"><button data-edit="${d.id}">Edit</button><button data-maintenance="${d.id}" data-minutes="${d.maintenance_until>Date.now()/1000?0:60}">${d.maintenance_until>Date.now()/1000?'End maintenance':'Maintain 1h'}</button><button data-device="${d.id}">Remove</button></td></tr>`).join('')||'<tr><td colspan="7">No matching hosts. Open Add / Discover devices to add your network.</td></tr>';}
 function renderOperations(s){
 const issues=problemsOf(s),active=issues.filter(c=>c.state_type==='HARD'&&!c.acknowledged&&!c.maintenance);
 $('summary').innerHTML=[['Total hosts',s.devices.length,'neutral'],['Hosts up',s.devices.filter(d=>d.state==='OK').length,'good'],['Hosts down',s.devices.filter(d=>d.state==='CRITICAL').length,'bad'],['Total services',s.services.length,'neutral'],['Service problems',s.services.filter(c=>!['OK','PENDING'].includes(c.state)).length,'warn'],['Active alerts',active.length,'bad']].map(([k,v,t])=>`<div class="stat stat-${t}"><span>${k}</span><strong>${v}</strong><small>Current inventory</small></div>`).join('');
