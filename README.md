@@ -15,6 +15,8 @@ The server listens on `127.0.0.1:8080`. To access it from your workstation, use 
 
 Optional discovery: enter an authorized IPv4 subnet (/24 or smaller) in the dashboard. Every five minutes, up to 16 parallel ICMP probes discover responding addresses and add them without duplicating existing inventory. First scan starts on the next monitoring cycle. Blank the subnet to disable future scans; an in-progress scan finishes. Ping cannot identify device brand/type, discover ping-blocked devices, or infer physical links.
 
+The Dashboard opens with device status and inventory at the top. Click Topology to open the diagram and connection editor. Under Add / Discover devices, configure subnet discovery or paste up to 256 IPv4 addresses for bulk addition; existing IPs are skipped. Bulk addition does not require devices to answer ping.
+
 Add devices by IPv4 address and connect them manually with interface labels. ICMP checks run every 30 seconds; initial checks can take one polling interval. Status transitions appear in the event history. An ICMP failure means the device did not respond to ping; it does not prove all of its services are down. Devices blocking ICMP will show down. A missing ping executable is reported as unavailable, not offline.
 
 Settings: `HOST` (default loopback), `PORT` (8080), `POLL_INTERVAL` (30, minimum 10), `NETWORK_DB` (data/network.db). SQLite data persists across restarts; back it up with SQLite backup tooling. History retains the latest 10,000 transitions globally. Polling is sequential; large networks need a concurrent monitoring worker in a future version.
