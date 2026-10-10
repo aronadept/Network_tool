@@ -1,4 +1,6 @@
-# Network Monitor — powered by Nagios Core
+# HL Agro IT Tool — powered by Nagios Core
+
+**HL Agro Products Pvt Ltd.** · Designed by **Deepanshu Sharma**. Uses the supplied HL Agro vector logo on the login page, navigation and browser icon.
 
 Ubuntu intranet monitoring console for mixed-brand network devices. Nagios Core handles scheduling, retries and SOFT/HARD states; this Python app provides login, inventory/discovery, service configuration, problems and topology. It runs a dedicated Core process using configuration under `data/nagios/`, without changing an existing system Nagios configuration.
 

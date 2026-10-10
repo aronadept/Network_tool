@@ -326,9 +326,9 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(200, dict(devices=devices,services=services,links=links,events=events,engine=health,discovery_results=candidates,
                                    discovery_progress=progress,discovery_subnet=config['subnet'] if config else None,
                                    ping_available=bool(shutil.which('ping')),interval=INTERVAL))
-        elif self.path in ('/', '/app.js', '/style.css'):
+        elif self.path in ('/', '/app.js', '/style.css', '/hl-agro-logo.svg'):
             name = 'index.html' if self.path == '/' else self.path[1:]
-            mime = {'index.html':'text/html; charset=utf-8','app.js':'text/javascript','style.css':'text/css'}[name]
+            mime = {'index.html':'text/html; charset=utf-8','app.js':'text/javascript','style.css':'text/css','hl-agro-logo.svg':'image/svg+xml'}[name]
             self.respond(200,(Path(__file__).parent/'web'/name).read_bytes(),mime)
         else:
             self.respond(404, {'error':'Not found'})

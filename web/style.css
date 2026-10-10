@@ -26,7 +26,6 @@ form label input,form label select,form label textarea{font-weight:400}
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 .sidebar{position:fixed;inset:0 auto 0 0;width:218px;background:var(--nav);color:#d5deea;display:flex;flex-direction:column;overflow-y:auto;z-index:30;border-right:1px solid #202b38}
 .sidebar-brand{display:flex;align-items:center;gap:11px;height:72px;padding:15px 16px;background:#202c3a;border-bottom:1px solid #354150}
-.brand-mark{display:grid;place-items:center;flex:none;width:34px;height:34px;background:#1689c7;color:white;font:bold italic 27px Georgia,serif;border-radius:4px;border-bottom:3px solid #106b9e}
 .sidebar-brand strong{font-size:15px;color:#fff}
 .sidebar-brand small{display:block;color:#8197ab;font-size:8px;letter-spacing:1.5px;margin-top:6px}
 .nav-label{font-size:9px;font-weight:bold;letter-spacing:1.1px;color:#879aaa;padding:0 18px;margin:22px 0 8px}
@@ -194,7 +193,6 @@ th[aria-sort=ascending],th[aria-sort=descending]{background:#e0ebf5;color:#137ab
 .page-footer{padding:0 23px 22px;display:flex;justify-content:space-between;font-size:10px;color:#97a5b3}
 .login-screen{min-height:100vh;background:linear-gradient(120deg,#1c2c3e,#304960);display:flex;align-items:center;justify-content:center;gap:90px;padding:40px}
 .login-intro{max-width:420px;color:#fff}
-.login-intro .brand-mark{width:48px;height:48px;font-size:38px;margin-bottom:25px}
 .login-intro h1{color:#fff;font-size:46px;line-height:1.2}
 .login-intro p{font-size:13px;color:#a1b9cd;margin-top:25px}
 .login-card{width:360px;max-width:100%;background:#fff;border-radius:4px;padding:30px;box-shadow:0 20px 60px #10202f55}
@@ -257,3 +255,20 @@ h1{font-size:24px}
 .group-grid{grid-template-columns:1fr}
 .legend{flex-wrap:wrap}
 }
+
+/* Company branding uses the original supplied vector logo. */
+.sidebar-brand{height:auto;min-height:150px;flex-direction:column;align-items:flex-start;gap:10px;padding:16px 18px;border-bottom:2px solid #8fc43c}
+.sidebar-logo-plate{display:flex;align-items:center;justify-content:center;background:#fff;border-radius:3px;width:154px;padding:6px 12px}
+.sidebar-logo-plate img{display:block;max-width:100%;height:auto}
+.sidebar-brand small{font-size:10px;letter-spacing:0;color:#a6bacb;line-height:1.5}
+.company-logo-plate{display:inline-flex;background:#fff;padding:16px 22px;border-radius:5px;margin-bottom:25px;border-bottom:4px solid #8fc43c}
+.company-logo-plate img{display:block;max-width:100%;height:auto}
+.login-intro h1{font-size:37px}
+.login-intro p.company-name{font-size:18px;color:#e3eddd;margin:12px 0 22px}
+.login-intro p.design-credit{font-size:11px;color:#a8bfce;margin-top:32px}
+.login-card-logo{display:block;max-width:100%;height:auto;margin:0 0 22px}
+.login-card .login-company{margin:0 0 12px;color:#657b50;font-size:12px}
+.login-card .login-credit{font-size:10px;color:#8796a4;text-align:center;margin:20px 0 0;padding-top:16px;border-top:1px solid #e1e7ed}
+.page-footer{gap:12px;flex-wrap:wrap;line-height:1.5}
+.page-footer strong{font-weight:600}
+@media(max-width:850px){.page-footer>span.design-credit{display:block}.sidebar-brand{min-height:150px}}
