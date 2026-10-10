@@ -92,3 +92,9 @@ The real Core integration test runs when a Nagios binary is found; otherwise it 
 See THIRD_PARTY.md for the Core source/license relationship.
 
 Click a device name in Host status to open its detail page: live host state, check attempts/output, latency, SNMP configuration status, service configuration and status, saved topology connections, and the latest 100 host/service events. Credentials are never returned. Details refresh every five seconds; only collected or configured information is displayed.
+
+## Fetch device inventory with SNMP
+
+Open a host detail page, choose **SNMP credentials** (the device is preselected), and save its v2c or v3 credentials. Return to the device and click **Fetch device details**. The server reads standard system hostname, description, object ID, uptime, location/contact and IF-MIB interface descriptions, operational states and reported speeds on UDP 161. Details are persisted as a timestamped snapshot separate from the manual inventory; names, brands, models, service checks and topology connections are not overwritten. Fetching does not create service checks.
+
+Requests use saved encrypted credentials and are limited to 25 seconds and 64 interface entries. Unsupported fields are left unavailable with partial-result messages. Failed fetches keep the previous successful snapshot. Automatic LLDP links, model identification, CPU/RAM metrics and traffic-rate graphs are not implemented by this action. Interface speeds are reported IF-MIB values; very fast interfaces can exceed the legacy ifSpeed range. Only the selected host is queried, and credentials are never returned to the browser.

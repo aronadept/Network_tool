@@ -18,7 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 import engine
-from security import password_hash, password_matches, encrypt_credentials
+import profiling
+from security import password_hash, password_matches, encrypt_credentials, decrypt_credentials
 
 DB = Path(os.environ.get('NETWORK_DB', 'data/network.db'))
 DISCOVERY_WORKERS = max(1, min(64, int(os.environ.get('DISCOVERY_WORKERS', '32'))))
@@ -49,6 +50,7 @@ def initialize():
     with connect() as conn:
         conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript("""
+        CREATE TABLE IF NOT EXISTS device_profiles (device_id INTEGER PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, payload TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS discovery_results (
           ip TEXT PRIMARY KEY, subnet TEXT NOT NULL, last_seen REAL NOT NULL, latency REAL);
         CREATE TABLE IF NOT EXISTS discovery (id INTEGER PRIMARY KEY CHECK(id=1), subnet TEXT NOT NULL);
@@ -302,7 +304,9 @@ class Handler(BaseHTTPRequestHandler):
                 services = [dict(r) for r in conn.execute('SELECT * FROM services WHERE device_id=? ORDER BY name', (device_id,))]
                 events = [dict(r) for r in conn.execute('SELECT e.*,s.name AS service_name FROM events e LEFT JOIN services s ON s.id=e.service_id WHERE e.device_id=? ORDER BY e.id DESC LIMIT 100', (device_id,))]
                 links = [dict(r) for r in conn.execute('SELECT l.*,a.name AS source_name,b.name AS target_name FROM links l JOIN devices a ON a.id=l.source JOIN devices b ON b.id=l.target WHERE l.source=? OR l.target=?', (device_id,device_id))]
-            self.respond(200, dict(host=host, services=services, events=events, links=links, interval=INTERVAL))
+                profile_row=conn.execute('SELECT payload FROM device_profiles WHERE device_id=?',(device_id,)).fetchone()
+                profile=json.loads(profile_row['payload']) if profile_row else None
+            self.respond(200, dict(host=host, services=services, events=events, links=links, interval=INTERVAL,profile=profile))
             return
         if self.path == '/api/state':
             if not self.session():
@@ -387,6 +391,23 @@ class Handler(BaseHTTPRequestHandler):
                 with connect() as conn:
                     conn.execute('DELETE FROM sessions WHERE token_hash=?',(session['token_hash'],))
                 self.respond(200, {'ok':True},cookie=self.cookie('',0))
+                return
+            if self.path == '/api/fetch-device-details':
+                device_id=int(data['id'])
+                with connect() as conn:
+                    host=conn.execute('SELECT ip,snmp_secret FROM devices WHERE id=?',(device_id,)).fetchone()
+                if not host:
+                    raise ValueError('Device not found')
+                if not host['snmp_secret']:
+                    raise ValueError('Save SNMP credentials for this device first')
+                try:
+                    credentials=decrypt_credentials(DB,host['snmp_secret'])
+                except Exception:
+                    raise ValueError('Stored SNMP credentials could not be read; save them again') from None
+                profile=profiling.fetch_profile(host['ip'],credentials)
+                with connect() as conn:
+                    conn.execute('INSERT INTO device_profiles(device_id,payload) VALUES(?,?) ON CONFLICT(device_id) DO UPDATE SET payload=excluded.payload',(device_id,json.dumps(profile)))
+                self.respond(200,{'ok':True,'profile':profile})
                 return
             reload_engine = False
             response = {'ok':True}
