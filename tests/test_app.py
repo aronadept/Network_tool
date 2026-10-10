@@ -55,7 +55,28 @@ class Workflow(unittest.TestCase):
             app.discover('192.168.1.0/30')
         self.assertEqual(len(self.state()['devices']), 1)
         self.assertEqual(self.state()['devices'][0]['ip'], '192.168.1.1')
-        with self.assertRaises(ValueError):app.discover('192.168.0.0/16')
+        with self.assertRaises(ValueError):app.discover('192.168.0.0/15')
+
+    def test_large_subnet_configuration_and_bounds(self):
+        with patch('app.shutil.which', return_value='/usr/bin/ping'):
+            self.post('/api/discovery', {'subnet': '10.5.12.0/16'})
+            self.assertEqual(self.state()['discovery_subnet'], '10.5.0.0/16')
+            for subnet in ['10.0.0.0/15', '::/64']:
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    self.post('/api/discovery', {'subnet': subnet})
+                self.assertEqual(e.exception.code, 400)
+            self.post('/api/discovery', {'subnet': ''})
+            self.assertIsNone(self.state()['discovery_subnet'])
+
+    def test_large_scan_cancels_with_bounded_work(self):
+        def cancelled():
+            with app.DISCOVERY_LOCK:
+                return app.DISCOVERY_PROGRESS['checked'] >= 40
+        with patch('app.probe', return_value=('down', None)) as probe:
+            app.discover('10.5.0.0/16', cancelled)
+        self.assertLessEqual(probe.call_count, 40 + app.DISCOVERY_WORKERS)
+        self.assertEqual(app.DISCOVERY_PROGRESS['total'], 65534)
+        self.assertEqual(app.DISCOVERY_PROGRESS['status'], 'cancelled')
 
     def test_missing_ping_not_offline(self):
         with patch('app.shutil.which',return_value=None):self.assertEqual(app.probe('127.0.0.1'),('unavailable',None))

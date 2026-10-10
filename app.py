@@ -12,6 +12,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 DB = Path(os.environ.get('NETWORK_DB', 'data/network.db'))
+DISCOVERY_WORKERS = max(1, min(64, int(os.environ.get('DISCOVERY_WORKERS', '32'))))
+DISCOVERY_WAKE = threading.Event()
+DISCOVERY_LOCK = threading.Lock()
+DISCOVERY_GENERATION = 0
+DISCOVERY_PROGRESS = {'status': 'idle', 'checked': 0, 'total': 0, 'found': 0, 'subnet': None}
+
 INTERVAL = max(10, int(os.environ.get('POLL_INTERVAL', '30')))
 
 
@@ -73,32 +79,76 @@ def poll_once():
             conn.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 10000)')
 
 
-def discover(subnet):
+def discovery_network(subnet):
     network = ipaddress.ip_network(subnet, strict=False)
-    if network.version != 4 or network.num_addresses > 256:
-        raise ValueError('Use an IPv4 subnet with at most 256 addresses (/24 or smaller)')
+    if network.version != 4 or network.prefixlen < 16:
+        raise ValueError('Use an IPv4 /16 or smaller subnet (such as /24)')
+    return network
+
+
+def discover(subnet, cancelled=lambda: False):
+    network = discovery_network(subnet)
+    total = network.num_addresses - 2 if network.prefixlen < 31 else network.num_addresses
+    with DISCOVERY_LOCK:
+        DISCOVERY_PROGRESS.update(status='scanning', checked=0, total=total, found=0,
+                                  subnet=str(network), error=None)
     def inspect(address):
         try:
             return str(address), probe(str(address))[0]
         except (OSError, subprocess.TimeoutExpired):
             return str(address), 'unavailable'
-    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-        for address, status in pool.map(inspect, network.hosts()):
-            if status == 'up':
-                with connect() as conn:
-                    conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')",
-                                 ('Discovered ' + address, address))
+    addresses = iter(network.hosts())
+    # Keep only one bounded batch in memory, even for a /16.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=DISCOVERY_WORKERS) as pool:
+        while not cancelled():
+            import itertools
+            batch = list(itertools.islice(addresses, DISCOVERY_WORKERS))
+            if not batch:
+                break
+            futures = [pool.submit(inspect, address) for address in batch]
+            for future in concurrent.futures.as_completed(futures):
+                address, status = future.result()
+                if cancelled():
+                    break
+                if status == 'up':
+                    with connect() as conn:
+                        conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')",
+                                     ('Discovered ' + address, address))
+                with DISCOVERY_LOCK:
+                    DISCOVERY_PROGRESS['checked'] += 1
+                    DISCOVERY_PROGRESS['found'] += int(status == 'up')
+    was_cancelled = cancelled()
+    with DISCOVERY_LOCK:
+        DISCOVERY_PROGRESS['status'] = 'cancelled' if was_cancelled else 'complete'
 
 
-def monitor():
-    last_discovery = 0
+def discovery_loop():
     while True:
+        DISCOVERY_WAKE.clear()
+        with DISCOVERY_LOCK:
+            generation = DISCOVERY_GENERATION
+        def cancelled():
+            with DISCOVERY_LOCK:
+                return generation != DISCOVERY_GENERATION
         try:
             with connect() as conn:
                 config = conn.execute('SELECT subnet FROM discovery WHERE id=1').fetchone()
-            if config and time.time() - last_discovery >= 300:
-                discover(config['subnet'])
-                last_discovery = time.time()
+            if config:
+                if not shutil.which('ping'):
+                    raise RuntimeError('Install iputils-ping to run discovery')
+                discover(config['subnet'], cancelled)
+            else:
+                with DISCOVERY_LOCK:
+                    DISCOVERY_PROGRESS.update(status='disabled', subnet=None)
+        except (sqlite3.Error, ValueError, RuntimeError) as exc:
+            with DISCOVERY_LOCK:
+                DISCOVERY_PROGRESS.update(status='error', error=str(exc))
+        DISCOVERY_WAKE.wait(300)
+
+
+def monitor():
+    while True:
+        try:
             poll_once()
         except sqlite3.Error:
             import logging
@@ -123,7 +173,9 @@ class Handler(BaseHTTPRequestHandler):
                 links = [dict(r) for r in conn.execute('SELECT * FROM links')]
                 config = conn.execute('SELECT subnet FROM discovery WHERE id=1').fetchone()
                 events = [dict(r) for r in conn.execute('SELECT e.*,d.name FROM events e JOIN devices d ON d.id=e.device_id ORDER BY e.id DESC LIMIT 100')]
-            self.respond(200, dict(devices=devices, links=links, events=events,
+            with DISCOVERY_LOCK:
+                progress = dict(DISCOVERY_PROGRESS)
+            self.respond(200, dict(discovery_progress=progress, devices=devices, links=links, events=events,
                                    discovery_subnet=config['subnet'] if config else None, ping_available=bool(shutil.which('ping')), interval=INTERVAL))
         elif self.path in ('/', '/app.js', '/style.css'):
             name = 'index.html' if self.path == '/' else self.path[1:]
@@ -148,9 +200,7 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path == '/api/discovery':
                     subnet = str(data.get('subnet', '')).strip()
                     if subnet:
-                        network = ipaddress.ip_network(subnet, strict=False)
-                        if network.version != 4 or network.num_addresses > 256:
-                            raise ValueError('Use an IPv4 /24 or smaller subnet')
+                        network = discovery_network(subnet)
                         if not shutil.which('ping'):
                             raise ValueError('Install iputils-ping before enabling discovery')
                         conn.execute('INSERT OR REPLACE INTO discovery(id,subnet) VALUES(1,?)', (str(network),))
@@ -182,6 +232,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.respond(404, {'error':'Not found'})
                     return
+            if self.path == '/api/discovery':
+                global DISCOVERY_GENERATION
+                with DISCOVERY_LOCK:
+                    DISCOVERY_GENERATION += 1
+                DISCOVERY_WAKE.set()
             self.respond(201, {'ok': True})
         except (ValueError, KeyError, TypeError, sqlite3.IntegrityError) as exc:
             self.respond(400, {'error': str(exc)})
@@ -190,6 +245,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == '__main__':
     initialize()
     threading.Thread(target=monitor, daemon=True).start()
+    threading.Thread(target=discovery_loop, daemon=True).start()
     server = ThreadingHTTPServer((os.environ.get('HOST', '127.0.0.1'), int(os.environ.get('PORT', '8080'))), Handler)
     print('Network monitor listening on', server.server_address, flush=True)
     server.serve_forever()
