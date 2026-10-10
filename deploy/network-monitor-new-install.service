@@ -1,0 +1,22 @@
+# Fresh Ubuntu installation example; adapt the user, paths and port if needed.
+[Unit]
+Description=HL Agro IT Tool dashboard and Nagios Core engine
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hl-agro
+Group=hl-agro
+WorkingDirectory=/home/hl-agro/Network_tool
+Environment=HOST=0.0.0.0
+Environment=PORT=8080
+ExecStart=/home/hl-agro/Network_tool/.venv/bin/python /home/hl-agro/Network_tool/app.py
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -4,6 +4,79 @@
 
 Ubuntu intranet monitoring console for mixed-brand network devices. Nagios Core handles scheduling, retries and SOFT/HARD states; this Python app provides login, inventory/discovery, service configuration, problems and topology. It runs a dedicated Core process using configuration under `data/nagios/`, without changing an existing system Nagios configuration.
 
+## Install on another Ubuntu server or container
+
+These steps create a fresh installation with no previous devices, services or credentials. Use the `feature/network-monitor-mvp` branch for the current app. The examples use a dedicated `hl-agro` application user; Nagios Core must run as this user rather than root. For an existing installation under `aron`, use the upgrade section below instead.
+
+### 1. Install prerequisites and create the application user
+
+Run from a root terminal on the new Ubuntu machine:
+
+```sh
+apt-get update
+apt-get install -y python3 python3-venv iputils-ping git nagios4-core
+adduser --disabled-password --gecos "" hl-agro
+su - hl-agro
+```
+
+If `hl-agro` already exists, skip `adduser`. If `nagios4-core` is unavailable, install the other prerequisites and follow [If the Core package is unavailable](#if-the-core-package-is-unavailable) after cloning.
+
+### 2. Download the app, install dependencies and create an admin
+
+Run as `hl-agro`:
+
+```sh
+git clone --branch feature/network-monitor-mvp --single-branch https://github.com/aronadept/Network_tool.git
+cd /home/hl-agro/Network_tool
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python app.py create-admin --username admin
+HOST=0.0.0.0 PORT=8080 .venv/bin/python app.py
+```
+
+Enter a new admin password twice when prompted. Open `http://SERVER-IP:8080` using the new machine's LAN address. Sign in and confirm **Monitoring Engine → Status: RUNNING**. The dashboard should have no hosts initially; add your devices and SNMP credentials through the console. A private GitHub repository requires an account with repository access; do not place tokens in clone URLs. If the clone directory already exists, inspect that installation before continuing rather than cloning over it.
+
+The server needs network access to the monitored devices: ICMP for ping/discovery, UDP 161 for SNMP, and the ports used by configured TCP/HTTP checks. Browsers need access to TCP 8080 for the direct test listener. Keep the existing network/firewall policy and allow the required traffic for your intranet as appropriate. For shared deployment, use the HTTPS reverse-proxy settings described below.
+
+### 3. Enable automatic startup with systemd
+
+Stop the foreground app with Ctrl+C, then run `exit` to return to the root terminal. Install the supplied template for this new-machine path:
+
+```sh
+cp /home/hl-agro/Network_tool/deploy/network-monitor-new-install.service /etc/systemd/system/network-monitor.service
+systemctl daemon-reload
+systemctl enable --now network-monitor
+systemctl status network-monitor --no-pager
+```
+
+Expect `active (running)` from systemd and `RUNNING` in the web console's Monitoring Engine page. The template uses `/home/hl-agro/Network_tool`, user/group `hl-agro`, port 8080 and private file permissions. If your username, directory or port differs, edit the installed unit before starting it. Containers without systemd need a container supervisor or the foreground command instead; `systemctl` will not work there.
+
+### Logs, restart and later updates
+
+As root:
+
+```sh
+journalctl -u network-monitor -n 50 --no-pager
+systemctl restart network-monitor
+systemctl stop network-monitor
+systemctl start network-monitor
+```
+
+For subsequent code updates, stop the service as root, update as the application user, then start it again:
+
+```sh
+systemctl stop network-monitor
+su - hl-agro
+cd /home/hl-agro/Network_tool
+git pull --ff-only origin feature/network-monitor-mvp
+.venv/bin/python -m pip install -r requirements.txt
+exit
+systemctl start network-monitor
+systemctl status network-monitor --no-pager
+```
+
+Refresh the browser with Ctrl+Shift+R after updates. These update commands preserve app data. Do not run `fresh_setup.py --discard-old-data` for a normal upgrade. To migrate an existing installation's inventory and credentials, back up and restore the whole stopped `data/` directory, including `.credential-key`, with ownership assigned to the new application user; see [Persistence and settings](#persistence-and-settings).
+
 ## Fresh Nagios-inspired console
 
 The interface is rebuilt with a compact Nagios-inspired operations layout: grouped left navigation, an always-visible host/service status strip, clickable dashboard totals, dedicated Host Status and Service Status tables, host groups, problems, maintenance, event history, network topology, configuration and engine diagnostics. Host and service names open individual status/configuration/history pages. Tables support filtering and sorting. Automatic refresh can be paused; manual refresh remains available. All pages adapt to smaller screens. No CDN, example hosts or simulated monitoring values are included.

@@ -1,7 +1,8 @@
 # Example for this user's Ubuntu container. Change all aron paths/user names as needed.
 [Unit]
-Description=Network Monitor dashboard and Nagios Core engine
-After=network.target
+Description=HL Agro IT Tool dashboard and Nagios Core engine
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=simple
@@ -14,6 +15,7 @@ ExecStart=/home/aron/Network_tool/.venv/bin/python /home/aron/Network_tool/app.p
 Restart=on-failure
 RestartSec=5
 KillMode=control-group
+TimeoutStopSec=30
 UMask=0077
 
 [Install]
