@@ -33,6 +33,30 @@ class ApiTestCase(unittest.TestCase):
         with self.opener.open(self.url+'/api/state') as r:return json.load(r)
 
 class Workflow(ApiTestCase):
+    def test_host_details_redaction_history_and_access(self):
+        for name,ip in [('Router','192.168.1.1'),('Switch','192.168.1.2')]:
+            self.post('/api/devices',dict(name=name,ip=ip,kind='router'))
+        a,b=[d['id'] for d in self.state()['devices']]
+        with app.connect() as conn:
+            conn.execute("UPDATE devices SET snmp_secret='private-fixture-secret',snmp_version='3' WHERE id=?",(a,))
+        app.record_result('devices',a,'CRITICAL','Router offline',200,3,'HARD')
+        app.record_result('devices',b,'OK','Other host output',200,1,'HARD')
+        self.post('/api/links',dict(source=a,target=b,label='uplink'))
+        with self.opener.open(self.url+'/api/device?id='+str(a)) as response:
+            details=json.load(response)
+        self.assertTrue(details['host']['snmp_configured'])
+        self.assertNotIn('snmp_secret',details['host'])
+        self.assertNotIn('private-fixture-secret',json.dumps(details))
+        self.assertEqual([e['output'] for e in details['events']],['Router offline'])
+        self.assertEqual(details['links'][0]['label'],'uplink')
+        for query,code in [('bad',400),('99999',404)]:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.opener.open(self.url+'/api/device?id='+query)
+            self.assertEqual(error.exception.code,code)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(self.url+'/api/device?id='+str(a))
+        self.assertEqual(error.exception.code,401)
+
     def test_inventory_monitor_topology_and_delete(self):
         self.post('/api/devices',{'name':'Router','ip':'127.0.0.1','kind':'router'})
         self.post('/api/devices',{'name':'Switch','ip':'192.168.1.2','kind':'switch'})
@@ -63,9 +87,30 @@ class Workflow(ApiTestCase):
         with patch('app.probe', side_effect=fake):
             app.discover('192.168.1.0/30')
             app.discover('192.168.1.0/30')
-        self.assertEqual(len(self.state()['devices']), 1)
-        self.assertEqual(self.state()['devices'][0]['ip'], '192.168.1.1')
+        self.assertEqual(self.state()['devices'], [])
+        with app.connect() as conn:
+            rows=conn.execute('SELECT * FROM discovery_results').fetchall()
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['ip'],'192.168.1.1')
+        self.post('/api/add-discovered',{'ips':['192.168.1.1']})
+        self.assertEqual(len(self.state()['devices']),1)
+        self.assertEqual(self.post('/api/add-discovered',{'ips':['192.168.1.1']})['skipped'],1)
         with self.assertRaises(ValueError):app.discover('192.168.0.0/15')
+
+    def test_discovery_approval_is_explicit_and_atomic(self):
+        with app.connect() as conn:
+            conn.execute("INSERT INTO discovery(subnet) VALUES('192.168.1.0/24')")
+            conn.execute("INSERT INTO discovery_results(ip,subnet,last_seen,latency) VALUES('192.168.1.1','192.168.1.0/24',100,1)")
+            conn.execute("INSERT INTO discovery_results(ip,subnet,last_seen,latency) VALUES('192.168.1.2','192.168.1.0/24',100,2)")
+        self.assertEqual(len(self.state()['discovery_results']),2)
+        self.assertEqual(self.state()['devices'],[])
+        with self.assertRaises(urllib.error.HTTPError):
+            self.post('/api/add-discovered',{'ips':['192.168.1.1','192.168.1.3']})
+        self.assertEqual(self.state()['devices'],[])
+        self.assertEqual(self.post('/api/add-discovered',{'ips':['192.168.1.2']})['added'],1)
+        result={r['ip']:r for r in self.state()['discovery_results']}
+        self.assertIsNone(result['192.168.1.1']['device_id'])
+        self.assertIsNotNone(result['192.168.1.2']['device_id'])
 
     def test_large_subnet_configuration_and_bounds(self):
         with patch('app.shutil.which', return_value='/usr/bin/ping'):

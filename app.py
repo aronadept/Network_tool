@@ -16,7 +16,7 @@ import time
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs
 import engine
 from security import password_hash, password_matches, encrypt_credentials
 
@@ -49,6 +49,8 @@ def initialize():
     with connect() as conn:
         conn.execute('PRAGMA journal_mode=WAL')
         conn.executescript("""
+        CREATE TABLE IF NOT EXISTS discovery_results (
+          ip TEXT PRIMARY KEY, subnet TEXT NOT NULL, last_seen REAL NOT NULL, latency REAL);
         CREATE TABLE IF NOT EXISTS discovery (id INTEGER PRIMARY KEY CHECK(id=1), subnet TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS devices (
           id INTEGER PRIMARY KEY, name TEXT NOT NULL, ip TEXT NOT NULL UNIQUE,
@@ -173,9 +175,10 @@ def discover(subnet, cancelled=lambda: False):
                                   subnet=str(network), error=None)
     def inspect(address):
         try:
-            return str(address), probe(str(address))[0]
+            status, latency = probe(str(address))
+            return str(address), status, latency
         except (OSError, subprocess.TimeoutExpired):
-            return str(address), 'unavailable'
+            return str(address), 'unavailable', None
     addresses = iter(network.hosts())
     # Keep only one bounded batch in memory, even for a /16.
     with concurrent.futures.ThreadPoolExecutor(max_workers=DISCOVERY_WORKERS) as pool:
@@ -186,15 +189,13 @@ def discover(subnet, cancelled=lambda: False):
                 break
             futures = [pool.submit(inspect, address) for address in batch]
             for future in concurrent.futures.as_completed(futures):
-                address, status = future.result()
+                address, status, latency = future.result()
                 if cancelled():
                     break
                 if status == 'up':
                     with connect() as conn:
-                        result = conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')",
-                                     ('Discovered ' + address, address))
-                        if result.rowcount:
-                            engine.WAKE.set()
+                        conn.execute('INSERT INTO discovery_results(ip,subnet,last_seen,latency) VALUES(?,?,?,?) ON CONFLICT(ip) DO UPDATE SET subnet=excluded.subnet,last_seen=excluded.last_seen,latency=excluded.latency',
+                                     (address,str(network),time.time(),latency))
                 with DISCOVERY_LOCK:
                     DISCOVERY_PROGRESS['checked'] += 1
                     DISCOVERY_PROGRESS['found'] += int(status == 'up')
@@ -261,6 +262,29 @@ class Handler(BaseHTTPRequestHandler):
             session = self.session()
             self.respond(200, {'authenticated':bool(session),'username':session['username'] if session else None,'csrf':session['csrf'] if session else None})
             return
+        if urlsplit(self.path).path == '/api/device':
+            if not self.session():
+                self.respond(401, {'error':'Please sign in'})
+                return
+            try:
+                device_id = int(parse_qs(urlsplit(self.path).query)['id'][0])
+                if device_id < 1:
+                    raise ValueError()
+            except (KeyError, ValueError):
+                self.respond(400, {'error':'A valid device ID is required'})
+                return
+            with connect() as conn:
+                row = conn.execute('SELECT * FROM devices WHERE id=?', (device_id,)).fetchone()
+                if row is None:
+                    self.respond(404, {'error':'Device not found'})
+                    return
+                host = dict(row)
+                host['snmp_configured'] = bool(host.pop('snmp_secret'))
+                services = [dict(r) for r in conn.execute('SELECT * FROM services WHERE device_id=? ORDER BY name', (device_id,))]
+                events = [dict(r) for r in conn.execute('SELECT e.*,s.name AS service_name FROM events e LEFT JOIN services s ON s.id=e.service_id WHERE e.device_id=? ORDER BY e.id DESC LIMIT 100', (device_id,))]
+                links = [dict(r) for r in conn.execute('SELECT l.*,a.name AS source_name,b.name AS target_name FROM links l JOIN devices a ON a.id=l.source JOIN devices b ON b.id=l.target WHERE l.source=? OR l.target=?', (device_id,device_id))]
+            self.respond(200, dict(host=host, services=services, events=events, links=links, interval=INTERVAL))
+            return
         if self.path == '/api/state':
             if not self.session():
                 self.respond(401, {'error':'Please sign in'})
@@ -274,12 +298,13 @@ class Handler(BaseHTTPRequestHandler):
                 services = [dict(r) for r in conn.execute('SELECT s.*,d.name AS host_name,d.ip,d.maintenance_until FROM services s JOIN devices d ON d.id=s.device_id ORDER BY d.name,s.name')]
                 links = [dict(r) for r in conn.execute('SELECT * FROM links')]
                 config = conn.execute('SELECT subnet FROM discovery WHERE id=1').fetchone()
+                candidates = [dict(r) for r in conn.execute('SELECT r.*,d.id AS device_id FROM discovery_results r LEFT JOIN devices d ON d.ip=r.ip WHERE r.subnet=? ORDER BY r.ip', (config['subnet'] if config else '',))]
                 events = [dict(r) for r in conn.execute('SELECT e.*,d.name,s.name AS service_name FROM events e JOIN devices d ON d.id=e.device_id LEFT JOIN services s ON s.id=e.service_id ORDER BY e.id DESC LIMIT 100')]
             with DISCOVERY_LOCK:
                 progress = dict(DISCOVERY_PROGRESS)
             with engine.LOCK:
                 health = dict(engine.HEALTH)
-            self.respond(200, dict(devices=devices,services=services,links=links,events=events,engine=health,
+            self.respond(200, dict(devices=devices,services=services,links=links,events=events,engine=health,discovery_results=candidates,
                                    discovery_progress=progress,discovery_subnet=config['subnet'] if config else None,
                                    ping_available=bool(shutil.which('ping')),interval=INTERVAL))
         elif self.path in ('/', '/app.js', '/style.css'):
@@ -345,6 +370,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, {'ok':True},cookie=self.cookie('',0))
                 return
             reload_engine = False
+            response = {'ok':True}
             with connect() as conn:
                 if self.path == '/api/discovery':
                     subnet = str(data.get('subnet','')).strip()
@@ -355,6 +381,20 @@ class Handler(BaseHTTPRequestHandler):
                         conn.execute('INSERT OR REPLACE INTO discovery(id,subnet) VALUES(1,?)',(str(network),))
                     else:
                         conn.execute('DELETE FROM discovery')
+                elif self.path == '/api/add-discovered':
+                    submitted = data.get('ips')
+                    if not isinstance(submitted,list) or not 1<=len(submitted)<=256:
+                        raise ValueError('Select 1 to 256 discovered devices')
+                    addresses = list(dict.fromkeys(str(ipaddress.IPv4Address(address)) for address in submitted))
+                    for address in addresses:
+                        if not conn.execute('SELECT ip FROM discovery_results WHERE ip=?',(address,)).fetchone():
+                            raise ValueError('Only discovered addresses can be added from this list')
+                    added = 0
+                    for address in addresses:
+                        cursor = conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')", ('Discovered '+address,address))
+                        added += cursor.rowcount
+                    reload_engine = bool(added)
+                    response.update(added=added,skipped=len(addresses)-added)
                 elif self.path in ('/api/devices','/api/update-device'):
                     address = str(ipaddress.ip_address(data.get('ip','')))
                     if ipaddress.ip_address(address).version != 4:
@@ -426,7 +466,7 @@ class Handler(BaseHTTPRequestHandler):
                 DISCOVERY_WAKE.set()
             if reload_engine:
                 engine.WAKE.set()
-            self.respond(201, {'ok':True})
+            self.respond(201, response)
         except (ValueError,KeyError,TypeError,sqlite3.IntegrityError) as exc:
             self.respond(400, {'error':str(exc)})
         except sqlite3.Error:
