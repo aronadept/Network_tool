@@ -2,6 +2,22 @@
 
 Ubuntu intranet monitoring console for mixed-brand network devices. Nagios Core handles scheduling, retries and SOFT/HARD states; this Python app provides login, inventory/discovery, service configuration, problems and topology. It runs a dedicated Core process using configuration under `data/nagios/`, without changing an existing system Nagios configuration.
 
+## Fresh setup with the redesigned console
+
+The interface uses a light operations workspace, persistent sidebar navigation, host/service health breakdowns, compact tables, host search/state/group filters, mobile navigation and expandable engine diagnostics. Counts and bars come from live inventory; the app does not insert demonstration devices.
+
+For a clean installation, stop the running app first (Ctrl+C, or stop its systemd service). Update the branch and run as the application user, such as aron:
+
+```sh
+cd /home/aron/Network_tool
+git pull --ff-only origin feature/network-monitor-mvp
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python scripts/fresh_setup.py --username admin
+HOST=0.0.0.0 PORT=8080 .venv/bin/python app.py
+```
+
+The setup command asks for a new admin password, archives the former default `data/` directory privately outside the checkout, and creates an empty database with no previous hosts, services, links, history, discovery settings, accounts or SNMP secrets. It refuses to reset symlinked data or a detected running app. It never reuses the archived database. Run with NETWORK_DB unset; custom database paths are not reset. The prior archive can be deleted separately after confirming the fresh setup. Root must switch to the application user first (`su - aron`); initial package/venv prerequisites below still apply on a new machine. Refresh the browser with Ctrl+Shift+R after updating.
+
 ## Upgrade and run in your Ubuntu container
 
 Stop the previous app with Ctrl+C first. Keep a backup of existing data before upgrading. Run these as root in the container:
