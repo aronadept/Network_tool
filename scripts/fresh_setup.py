@@ -1,7 +1,8 @@
-"""Create a clean default database; keep the former data in a private archive."""
+"""Create an empty installation; archive or explicitly discard the former data."""
 import argparse
 import getpass
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -11,7 +12,7 @@ sys.path.insert(0,str(ROOT))
 import app
 
 
-def reset_data(root):
+def reset_data(root, discard_old_data=False):
     root=Path(root).resolve()
     data=root/'data'
     if data.is_symlink():
@@ -21,8 +22,9 @@ def reset_data(root):
             continue
         try:
             args=(process/'cmdline').read_bytes().decode(errors='replace').split('\0')
-            if 'app.py' in args or str(root/'app.py') in args:
-                if (process/'cwd').resolve()==root:
+            core_config = str(root/'data/nagios/nagios.cfg')
+            if 'app.py' in args or str(root/'app.py') in args or core_config in args:
+                if core_config in args or (process/'cwd').resolve()==root:
                     raise ValueError('Stop the running app first (Ctrl+C or stop its service)')
         except (PermissionError,FileNotFoundError,ProcessLookupError):
             continue
@@ -31,12 +33,16 @@ def reset_data(root):
         backup=Path(tempfile.mkdtemp(prefix='network-monitor-backup-',dir=root.parent))
         data.rename(backup/'data')
     data.mkdir(mode=0o700)
+    if discard_old_data and backup:
+        shutil.rmtree(backup)
+        backup=None
     return backup
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--username',default='admin')
+    parser.add_argument('--discard-old-data',action='store_true',help='Permanently remove the previous default data directory instead of archiving it')
     args=parser.parse_args()
     if os.getuid()==0:
         parser.error('Run as the application user (for example aron), not root')
@@ -51,11 +57,13 @@ def main():
     if not re.fullmatch(r'[A-Za-z0-9_.-]{1,40}',args.username):
         parser.error('Invalid username')
     try:
-        backup=reset_data(ROOT)
+        backup=reset_data(ROOT, discard_old_data=args.discard_old_data)
     except ValueError as exc:
         parser.error(str(exc))
     if backup:
         print('Previous data archived privately at:',backup)
+    if args.discard_old_data:
+        print('Previous default data removed; starting with an empty installation.')
     app.DB=ROOT/'data/network.db'
     app.initialize()
     app.create_admin(args.username,password)

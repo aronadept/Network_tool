@@ -33,6 +33,30 @@ class ApiTestCase(unittest.TestCase):
         with self.opener.open(self.url+'/api/state') as r:return json.load(r)
 
 class Workflow(ApiTestCase):
+    def test_service_details_only_returns_selected_service_events(self):
+        self.post('/api/devices',dict(name='Router',ip='192.168.1.1',kind='router'))
+        host=self.state()['devices'][0]['id']
+        with app.connect() as conn:
+            conn.execute("UPDATE devices SET snmp_secret='private-fixture-secret' WHERE id=?",(host,))
+            first=conn.execute("INSERT INTO services(device_id,name,kind,port) VALUES(?,'HTTP','http',80)",(host,)).lastrowid
+            second=conn.execute("INSERT INTO services(device_id,name,kind,port) VALUES(?,'SSH','tcp',22)",(host,)).lastrowid
+        app.record_result('services',first,'CRITICAL','HTTP failed',200,3,'HARD')
+        app.record_result('services',second,'OK','SSH responding',200,1,'HARD')
+        with self.opener.open(self.url+'/api/service?id='+str(first)) as response:
+            details=json.load(response)
+        self.assertEqual(details['service']['host_name'],'Router')
+        self.assertEqual(details['service']['name'],'HTTP')
+        self.assertEqual([e['output'] for e in details['events']],['HTTP failed'])
+        self.assertNotIn('private-fixture-secret',json.dumps(details))
+        self.assertNotIn('snmp_secret',details['service'])
+        for query,code in [('bad',400),('0',400),('99999',404)]:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.opener.open(self.url+'/api/service?id='+query)
+            self.assertEqual(error.exception.code,code)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(self.url+'/api/service?id='+str(first))
+        self.assertEqual(error.exception.code,401)
+
     def test_host_details_redaction_history_and_access(self):
         for name,ip in [('Router','192.168.1.1'),('Switch','192.168.1.2')]:
             self.post('/api/devices',dict(name=name,ip=ip,kind='router'))

@@ -22,11 +22,23 @@ class FreshSetup(unittest.TestCase):
             self.assertEqual(backup.stat().st_mode & 0o777,0o700)
             app.initialize()
             with app.connect() as c:
-                for table in ('devices','services','links','events','users','sessions','discovery'):
+                for table in ('devices','services','links','events','users','sessions','discovery','discovery_results'):
                     self.assertEqual(c.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0],0)
             app.DB=backup/'data/network.db'
             with app.connect() as c:self.assertEqual(c.execute('SELECT name FROM devices').fetchone()[0],'Previous router')
             app.DB=old
+    def test_discard_removes_previous_database_and_credentials(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'project';root.mkdir()
+            data=root/'data';data.mkdir()
+            (data/'network.db').write_bytes(b'old database')
+            (data/'.credential-key').write_bytes(b'old key')
+            (data/'nagios').mkdir()
+            (data/'nagios/status.dat').write_text('old states')
+            self.assertIsNone(fresh.reset_data(root, discard_old_data=True))
+            self.assertEqual(list(data.iterdir()),[])
+            self.assertEqual(list(Path(folder).iterdir()),[root])
+
     def test_running_app_prevents_reset(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'project';root.mkdir()

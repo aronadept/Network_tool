@@ -262,6 +262,25 @@ class Handler(BaseHTTPRequestHandler):
             session = self.session()
             self.respond(200, {'authenticated':bool(session),'username':session['username'] if session else None,'csrf':session['csrf'] if session else None})
             return
+        if urlsplit(self.path).path == '/api/service':
+            if not self.session():
+                self.respond(401, {'error':'Please sign in'})
+                return
+            try:
+                service_id = int(parse_qs(urlsplit(self.path).query)['id'][0])
+                if service_id < 1:
+                    raise ValueError()
+            except (KeyError, ValueError):
+                self.respond(400, {'error':'A valid service ID is required'})
+                return
+            with connect() as conn:
+                row = conn.execute('SELECT s.*,d.name AS host_name,d.ip,d.maintenance_until FROM services s JOIN devices d ON d.id=s.device_id WHERE s.id=?', (service_id,)).fetchone()
+                if row is None:
+                    self.respond(404, {'error':'Service not found'})
+                    return
+                events = [dict(r) for r in conn.execute('SELECT * FROM events WHERE service_id=? ORDER BY id DESC LIMIT 100', (service_id,))]
+            self.respond(200, dict(service=dict(row), events=events))
+            return
         if urlsplit(self.path).path == '/api/device':
             if not self.session():
                 self.respond(401, {'error':'Please sign in'})

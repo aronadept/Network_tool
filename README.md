@@ -2,21 +2,23 @@
 
 Ubuntu intranet monitoring console for mixed-brand network devices. Nagios Core handles scheduling, retries and SOFT/HARD states; this Python app provides login, inventory/discovery, service configuration, problems and topology. It runs a dedicated Core process using configuration under `data/nagios/`, without changing an existing system Nagios configuration.
 
-## Fresh setup with the redesigned console
+## Fresh Nagios-inspired console
 
-The interface uses a light operations workspace, persistent sidebar navigation, host/service health breakdowns, compact tables, host search/state/group filters, clickable column sorting (name, numeric IPv4, type, severity, latency and last check), mobile navigation and expandable engine diagnostics. Counts and bars come from live inventory; the app does not insert demonstration devices.
+The interface is rebuilt with a compact Nagios-inspired operations layout: grouped left navigation, an always-visible host/service status strip, clickable dashboard totals, dedicated Host Status and Service Status tables, host groups, problems, maintenance, event history, network topology, configuration and engine diagnostics. Host and service names open individual status/configuration/history pages. Tables support filtering and sorting. Automatic refresh can be paused; manual refresh remains available. All pages adapt to smaller screens. No CDN, example hosts or simulated monitoring values are included.
 
-For a clean installation, stop the running app first (Ctrl+C, or stop its systemd service). Update the branch and run as the application user, such as aron:
+For the requested **completely fresh installation**, stop the old app (Ctrl+C, or stop its systemd service). If your terminal is root, switch to the application user with `su - aron`. Then run:
 
 ```sh
 cd /home/aron/Network_tool
 git pull --ff-only origin feature/network-monitor-mvp
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python scripts/fresh_setup.py --username admin
+.venv/bin/python scripts/fresh_setup.py --discard-old-data --username admin
 HOST=0.0.0.0 PORT=8080 .venv/bin/python app.py
 ```
 
-The setup command asks for a new admin password, archives the former default `data/` directory privately outside the checkout, and creates an empty database with no previous hosts, services, links, history, discovery settings, accounts or SNMP secrets. It refuses to reset symlinked data or a detected running app. It never reuses the archived database. Run with NETWORK_DB unset; custom database paths are not reset. The prior archive can be deleted separately after confirming the fresh setup. Root must switch to the application user first (`su - aron`); initial package/venv prerequisites below still apply on a new machine. Refresh the browser with Ctrl+Shift+R after updating.
+Enter a new admin password twice when asked. `--discard-old-data` permanently removes the previous default `data/` directory, including inventory, services, connections, events, discovery results/settings, accounts, sessions, SNMP credentials, encryption key and generated Nagios configuration/state/logs. It creates an empty database and the new admin account; no prior data is loaded or archived. Browser refresh: Ctrl+Shift+R. Passwords are validated before removing data. The command refuses a symlinked data directory or a detected running app/Core process. Run with `NETWORK_DB` unset; custom database locations are not reset. Older external backups and system-wide Nagios installations are separate from this app and are not changed.
+
+Without `--discard-old-data`, the same setup tool creates an empty installation but keeps a private archive outside the checkout. For a new Ubuntu server without a venv or Nagios package, follow the prerequisites below first, then use the fresh setup command instead of `create-admin`.
 
 ## Upgrade and run in your Ubuntu container
 
@@ -53,12 +55,12 @@ Install `git gcc make libssl-dev` using your OS package manager, then run `sh sc
 
 ## Workflow
 
-- **Dashboard**: host state, service counts, unhandled HARD problems, host inventory and recent transitions. Group filter and Edit action allow names, brands, models and groups to be corrected after discovery.
-- **Services**: each host has an automatic ping check. Add TCP, HTTP/HTTPS or SNMP checks with an interval, timeout, retry count and optional numeric warning/critical thresholds. TCP/HTTP values use response milliseconds; SNMP uses the raw OID value. HTTP accepts 200–399 and does not follow redirects. HTTPS certificate verification is enforced, including the certificate's IP identity.
+- **Dashboard / Host Status / Host Groups**: live health totals and unhandled problems; separate searchable, sortable host table and group drilldown. Click a host to view check output, retries, latency, configuration, services, connections and its latest 100 events. Edit names, brands, models and groups after discovery.
+- **Service Status / Configuration**: separate monitoring and setup screens, sortable/filterable service status, clickable service details and service-specific event history. Each host has an automatic ping check. Add TCP, HTTP/HTTPS or SNMP checks with an interval, timeout, retry count and optional numeric warning/critical thresholds. TCP/HTTP values use response milliseconds; SNMP uses the raw OID value. HTTP accepts 200–399 and does not follow redirects. HTTPS certificate verification is enforced, including the certificate's IP identity.
 - **SNMP**: save per-host v2c community or v3 SHA-256/AES-128 authPriv credentials, then add an uptime/system-name template or custom numeric OID. SNMP v2c communities travel unencrypted; prefer v3 where supported. SNMPv3 devices using other algorithms are not supported yet. CPU/memory/interface OIDs vary by model; the app does not claim to infer them. Encryption protects stored credentials; the key and SQLite file are local files accessible to the app user. Never commit or share them.
 - **Problems**: OK, WARNING, CRITICAL, UNKNOWN and PENDING states with SOFT/HARD retry state. Acknowledge with a note. Maintenance suppresses the host and its services from the dashboard active-problem list while checks continue. **Acknowledgement and maintenance are dashboard-local in this release**; they are not exported as Core external commands. Native outbound Core notifications are disabled. State transitions are recorded as in-app events; email/Slack notifications are not implemented.
 - **Discovery**: an authorized IPv4 `/16` through `/32` subnet, up to 32 concurrent ICMP probes, repeating five minutes after completion. Responding addresses appear in a separate review list; scanning never adds inventory or Core objects. Select devices and click Add selected to enroll them, at which point Core configuration reloads. Existing IPs are marked Added and skipped. Scan results persist separately, with last-seen time and latency; the list shows results for the configured subnet. Results from previous cycles can remain listed with their last-seen timestamp, so appearance does not guarantee current reachability. Scanning a sparse /16 can take over an hour. The separate worker keeps discovery independent from Core monitoring. Blank the subnet to cancel after in-flight probes finish. Ping-blocked devices need manual/bulk addition.
-- **Topology**: saved connections in a layered map; zoom, Fit map, pan and device details. It does not automatically discover LLDP/CDP connections yet. Unconnected devices appear in a separate grid.
+- **Topology**: saved connections in a layered map; zoom, Fit map, pan and click a node for its full host detail page. It does not automatically discover LLDP/CDP connections yet. Unconnected devices appear in a separate grid.
 
 Core checks retry every 10 seconds. First check results can take a few seconds after adding objects. Editing inventory/services reloads the generated, validated Core configuration. Plugin commands receive only numeric database IDs; credentials are read/decrypted locally, never put in Core command lines or returned to the browser. Do not edit generated files in `data/nagios/`; update objects through the app.
 
