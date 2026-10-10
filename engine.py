@@ -85,6 +85,20 @@ define host {{
  notifications_enabled 0
  contacts dashboard
  notification_period 24x7
+}}
+# Older Core versions require at least one service even for host-only monitoring.
+# This internal disabled object is excluded from the dashboard by its host name.
+define service {{
+ host_name monitor-local
+ service_description engine-placeholder
+ check_command notification-disabled
+ max_check_attempts 1
+ active_checks_enabled 0
+ passive_checks_enabled 0
+ check_period 24x7
+ notifications_enabled 0
+ contacts dashboard
+ notification_period 24x7
 }}''']
     for d in devices:
         lines.append(f'''define host {{

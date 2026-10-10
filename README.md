@@ -33,7 +33,7 @@ For normal shared use, serve behind an HTTPS reverse proxy; set `PUBLIC_ORIGIN=h
 
 ### If the Core package is unavailable
 
-Install `git gcc make libssl-dev` using your OS package manager, then run `sh scripts/build-nagios.sh` as your normal user. It builds unmodified Core 4.5.14 from a pinned upstream Git revision with two compiler jobs and keeps its license/source. The app detects `.tools/nagios/bin/nagios`. Python dependencies still need the venv installation above. `NAGIOS_BIN` can select another installed binary. Generated configuration was validated against Core 4.5.14; verify older distro packages on your server.
+Install `git gcc make libssl-dev` using your OS package manager, then run `sh scripts/build-nagios.sh` as your normal user. It builds unmodified Core 4.5.14 from a pinned upstream Git revision with two compiler jobs and keeps its license/source. The app detects `.tools/nagios/bin/nagios`. Python dependencies still need the venv installation above. `NAGIOS_BIN` can select another installed binary. Generated configuration and a real service check were validated against Core 4.4.6 and 4.5.14. A disabled internal placeholder service supports host-only/empty inventory on older Core versions; it is excluded from dashboard service counts.
 
 ## Workflow
 

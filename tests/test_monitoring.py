@@ -183,6 +183,19 @@ class MigrationAndCore(unittest.TestCase):
             self.assertEqual(conn.execute('SELECT COUNT(*) FROM services').fetchone()[0],0)
 
     @unittest.skipUnless(engine.binary(),'Nagios Core binary not installed')
+    def test_core_validates_empty_and_host_only_inventory(self):
+        app.initialize()
+        engine.prepare(app.DB)
+        with app.connect() as conn:
+            conn.execute("INSERT INTO devices(name,ip,kind) VALUES('Host only','127.0.0.1','server')")
+        engine.prepare(app.DB)
+        with app.connect() as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM services').fetchone()[0],0)
+        objects=(engine.directory(app.DB)/'objects.cfg').read_text()
+        self.assertIn('service_description engine-placeholder',objects)
+        self.assertIn('host_name device-1',objects)
+
+    @unittest.skipUnless(engine.binary(),'Nagios Core binary not installed')
     def test_real_nagios_runs_service_plugin_and_writes_status(self):
         app.initialize()
         sock=socket.socket();sock.bind(('127.0.0.1',0));sock.listen()
