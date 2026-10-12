@@ -190,9 +190,9 @@ cd /home/hl-agro/Network_tool
 .venv/bin/python scripts/import_nagios.py /path/to/Nagios.zip --apply
 ```
 
-Start the service as root (`systemctl start network-monitor`) and check Host Status. Use `/home/aron/Network_tool` and user `aron` for the original container. A custom database requires the same `NETWORK_DB` setting used by the app. Keep backup archives outside the repository; it may contain secrets. The importer itself does not print/import credentials.
+Start the service as root (`systemctl start network-monitor`) and check Host Status. Use `/home/aron/Network_tool` and user `aron` for the original container. A custom database requires the same `NETWORK_DB` setting used by the app. Keep backup archives outside the repository; it may contain secrets. The importer never prints credentials. Compatible SNMPv2c communities are stored encrypted locally when the host has no saved credentials.
 
-By default, hosts under `objects/` and `localhost` are treated as bundled examples and excluded. If your real host definitions are under `objects/`, preview with `--include-example-hosts` and use that same flag with `--apply`; loopback, invalid/DNS-only and multicast addresses remain excluded. Templates without concrete addresses are not resolved. The importer adds inventory and automatic host ping checks only; old service commands, plugin binaries, credentials, accounts and topology are not migrated. Configure compatible service checks and SNMP credentials through the console afterwards. Running the import again skips already-present IPs.
+By default, hosts under `objects/` and `localhost` are treated as bundled examples and excluded. If your real host definitions are under `objects/`, preview with `--include-example-hosts` and use that same flag with `--apply`; loopback, invalid/DNS-only and multicast addresses remain excluded. Templates without concrete addresses are not resolved. The importer adds hosts plus compatible SNMP OID, TCP port and SSH reachability services. Host ping is automatic. It skips old custom plugins, camera scripts, IP-to-MAC checks, NRPE/NSClient++ and unsupported OIDs. It never runs commands from the archive. Review imported SNMPv2c credentials and device access; custom checks must be configured separately. Accounts and topology are not migrated. Re-running the import skips existing IPs and service names.
 
 ## Clear every monitored device
 
@@ -222,4 +222,6 @@ Review the addresses in the preview. Stop `network-monitor` as root, run the imp
 systemctl stop network-monitor
 su - aron -c 'cd /home/aron/Network_tool && .venv/bin/python scripts/import_nagios.py /home/aron/nagios-config-2026-10-12.tar.gz --apply'
 systemctl start network-monitor
-``` This archive contains NAS, printers, IP phones, switches, access points, routers, servers and cameras. NAS, printer, camera and phone have dedicated inventory types and can be found by the **Device type** filter or Host Status search. Some camera definitions contain an IP only in a single check argument; the importer reads that literal address as data. Host definitions with no usable IP are reported as unresolved and cannot become monitored devices until their address is known. The importer never executes old checks or plugins and does not import secrets.
+```
+
+This archive contains NAS, printers, IP phones, switches, access points, routers, servers and cameras. NAS, printer, camera and phone have dedicated inventory types and can be found by the **Device type** filter or Host Status search. Some camera definitions contain an IP only in a single check argument; the importer reads that literal address as data. Host definitions with no usable IP are reported as unresolved and cannot become monitored devices until their address is known. The importer never executes old checks or plugins. Supported SNMPv2c communities from this archive are encrypted locally and are not printed.

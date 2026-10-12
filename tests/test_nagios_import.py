@@ -81,3 +81,52 @@ class CurrentTarImport(unittest.TestCase):
         self.assertEqual(loader.classify('imageRUNNER_IR3020','Network Printer')[0],'printer')
         self.assertEqual(loader.classify('Gate_Camera','Cameras')[0],'camera')
         self.assertEqual(loader.classify('IP-Phone_Office','SIP Phone')[0],'phone')
+
+class ServiceImport(unittest.TestCase):
+    def test_imports_supported_checks_and_encrypts_community_without_overwriting(self):
+        from security import decrypt_credentials
+        source='''define host {\n host_name CoreSwitch\n address 192.168.1.10\n}\ndefine service {\n host_name CoreSwitch\n service_description SNMP Uptime\n check_command check_snmp!fixture-community-only!1.3.6.1.2.1.1.3.0\n check_interval 5\n max_check_attempts 3\n}\ndefine service {\n host_name CoreSwitch\n service_description SSH\n check_command check_ssh\n}\ndefine service {\n host_name CoreSwitch\n service_description Legacy script\n check_command check_nrpe!check_users\n}\n'''
+        old=app.DB
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                path=Path(folder)/'backup.zip'
+                with zipfile.ZipFile(path,'w') as archive:
+                    archive.writestr('Nagios/server/switch.cfg',source)
+                hosts,_=loader.read_backup(path)
+                checks,communities,skipped=loader.read_services(path,hosts)
+                self.assertEqual(len(checks),2)
+                self.assertEqual(checks[0]['interval'],300)
+                self.assertEqual(skipped['check_nrpe'],1)
+                app.DB=Path(folder)/'network.db';app.initialize()
+                loader.import_hosts(hosts)
+                first=loader.import_services(checks,communities)
+                self.assertEqual(first['added'],2)
+                self.assertEqual(first['secrets_saved'],1)
+                self.assertEqual(loader.import_services(checks,communities)['added'],0)
+                with app.connect() as conn:
+                    host=conn.execute('SELECT * FROM devices').fetchone()
+                    self.assertNotIn('fixture-community-only',host['snmp_secret'])
+                    self.assertEqual(decrypt_credentials(app.DB,host['snmp_secret'])['community'],'fixture-community-only')
+                    rows=conn.execute('SELECT name,kind,port,oid,interval FROM services ORDER BY name').fetchall()
+                    self.assertEqual([(r['name'],r['kind']) for r in rows],[('SNMP Uptime','snmp'),('SSH','tcp')])
+                    self.assertEqual(rows[0]['interval'],300)
+                    self.assertEqual(rows[1]['port'],22)
+                    self.assertFalse(any('fixture-community-only' in str(tuple(r)) for r in rows))
+        finally:app.DB=old
+
+    def test_existing_snmp_credentials_remain_untouched(self):
+        from security import encrypt_credentials,decrypt_credentials
+        old=app.DB
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                app.DB=Path(folder)/'network.db';app.initialize()
+                original=encrypt_credentials(app.DB,dict(version='2c',community='current-secret'))
+                with app.connect() as conn:
+                    conn.execute("INSERT INTO devices(name,ip,kind,snmp_secret,snmp_version) VALUES('Existing','192.168.1.10','switch',?,'2c')",(original,))
+                result=loader.import_services([dict(ip='192.168.1.10',name='Uptime',kind='snmp',port=161,oid='1.3.6.1.2.1.1.3.0',interval=60,max_attempts=3)],{'192.168.1.10':{'backup-secret'}})
+                self.assertEqual(result['added'],1)
+                self.assertEqual(result['secrets_saved'],0)
+                with app.connect() as conn:
+                    stored=conn.execute('SELECT snmp_secret FROM devices').fetchone()[0]
+                    self.assertEqual(decrypt_credentials(app.DB,stored)['community'],'current-secret')
+        finally:app.DB=old

@@ -2,6 +2,7 @@
 import argparse
 import ipaddress
 import re
+import collections
 import tarfile
 from pathlib import Path
 import sys
@@ -159,6 +160,94 @@ def read_backup(path,include_examples=False):
                 group_name=(hostgroup or group)[:80])
     return list(hosts.values()),report
 
+def read_services(path,hosts,include_examples=False):
+    """Return only checks whose original meaning matches a supported check type."""
+    files=list(config_files(path))
+    files.sort(key=lambda item:(0 if '/server/' in item[0].lower() else 2 if 'backup_file' in item[0].lower() else 1,item[0].lower()))
+    eligible_ips={host['ip'] for host in hosts}
+    by_name={}
+    for filename,text in files:
+        if not include_examples and '/objects/' in filename.lower():continue
+        for d in parse_definitions(text,'host'):
+            if not d.get('host_name') or not d.get('address'):continue
+            try:ip=str(ipaddress.IPv4Address(d['address']))
+            except ipaddress.AddressValueError:continue
+            if ip in eligible_ips:by_name.setdefault(d['host_name'],ip)
+    checks={};communities=collections.defaultdict(set);skipped=collections.Counter()
+    for filename,text in files:
+        if not include_examples and '/objects/' in filename.lower():continue
+        for d in parse_definitions(text,'service'):
+            base,*args=d.get('check_command','').split('!')
+            host_name=d.get('host_name','')
+            ip=by_name.get(host_name)
+            if not ip:
+                skipped['host has no imported IP']+=1
+                continue
+            name=d.get('service_description','').strip()[:80]
+            if not name:
+                skipped['missing service name']+=1
+                continue
+            if base in ('check_ping','check-host-alive'):
+                skipped['host ping already automatic']+=1
+                continue
+            kind=None;port=None;oid='';community=None
+            if base in ('check_snmp','check_snmp_printer') and len(args)>=2:
+                community=args[0]
+                oid=args[1].lstrip('.')
+                if re.fullmatch(r'[0-2](?:\.\d+){2,}',oid) and 1<=len(community)<=256 and '$' not in community and not any(c.isspace() for c in community):
+                    kind,port='snmp',161
+                else:
+                    skipped['SNMP OID or community unsupported']+=1
+                    continue
+            elif base=='check_tcp' and len(args)>=1 and args[0].isdigit() and 1<=int(args[0])<=65535:
+                kind,port='tcp',int(args[0])
+            elif base=='check_ssh':
+                kind,port='tcp',22
+            if kind is None:
+                skipped[base or 'missing command']+=1
+                continue
+            try:
+                interval=max(10,min(86400,round(float(d.get('check_interval','1'))*60)))
+                attempts=max(1,min(10,int(d.get('max_check_attempts','3'))))
+            except ValueError:
+                skipped['invalid interval or retries']+=1
+                continue
+            key=ip,name
+            if key in checks:
+                skipped['duplicate service definition']+=1
+                continue
+            checks[key]=dict(ip=ip,name=name,kind=kind,port=port,oid=oid,
+                             interval=interval,max_attempts=attempts)
+            if community:communities[ip].add(community)
+    return list(checks.values()),communities,skipped
+
+
+def import_services(checks,communities):
+    from security import encrypt_credentials
+    added=existing=secrets_saved=credential_conflicts=0
+    with app.connect() as conn:
+        devices={row['ip']:row for row in conn.execute('SELECT id,ip,snmp_secret FROM devices')}
+        for check in checks:
+            host=devices.get(check['ip'])
+            if not host:continue
+            cursor=conn.execute("INSERT OR IGNORE INTO services (device_id,name,kind,port,oid,interval,max_attempts) VALUES(?,?,?,?,?,?,?)",
+                (host['id'],check['name'],check['kind'],check['port'],check['oid'],
+                 check['interval'],check['max_attempts']))
+            added+=cursor.rowcount
+            existing+=1-cursor.rowcount
+        for ip,values in communities.items():
+            host=devices.get(ip)
+            if not host or host['snmp_secret']:continue
+            if len(values)!=1:
+                credential_conflicts+=1
+                continue
+            encrypted=encrypt_credentials(app.DB,dict(version='2c',community=next(iter(values))))
+            conn.execute("UPDATE devices SET snmp_secret=?,snmp_version='2c' WHERE id=? AND snmp_secret=''",(encrypted,host['id']))
+            secrets_saved+=1
+    return dict(added=added,existing=existing,secrets_saved=secrets_saved,
+                credential_conflicts=credential_conflicts)
+
+
 def import_hosts(hosts):
     added=0;existing=0
     with app.connect() as conn:
@@ -172,7 +261,7 @@ def import_hosts(hosts):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('backup',type=Path)
-    parser.add_argument('--apply',action='store_true',help='Add the reviewed hosts to the app database; default is preview only')
+    parser.add_argument('--apply',action='store_true',help='Add reviewed hosts and compatible services; default is preview only')
     parser.add_argument('--include-example-hosts',action='store_true',help='Include host definitions under objects/ (localhost is still excluded by address validation)')
     args=parser.parse_args()
     try:
@@ -183,14 +272,20 @@ def main():
     print('Device types:', ', '.join(f'{kind} {sum(h["kind"]==kind for h in hosts)}' for kind in sorted({h['kind'] for h in hosts})))
     for host in hosts:
         print(f"{host['ip']:16} {host['name']} [{host['kind']}; {host['group_name']}]")
+    checks,communities,skipped=read_services(args.backup,hosts,args.include_example_hosts)
+    print(f'Supported service checks: {len(checks)}; skipped: {sum(skipped.values())}')
+    print('Skipped by reason:', ', '.join(f'{reason} {count}' for reason,count in skipped.most_common()))
     if not args.apply:
         print('Preview only: no database changes. Review historical IPs, then rerun with --apply.')
         return
     app.initialize()
     added,existing=import_hosts(hosts)
+    services=import_services(checks,communities)
     print(f'Added {added} hosts; skipped {existing} existing IPs. Existing configuration was preserved.')
+    print(f"Added {services['added']} compatible services; skipped {services['existing']} existing services.")
+    print(f"Saved encrypted SNMP credentials for {services['secrets_saved']} hosts; {services['credential_conflicts']} hosts had conflicting communities and need manual review.")
     print('Start/restart the app service to load the new Nagios host checks.')
-    print('Only inventory was imported. Credentials, custom plugins and old service commands were not imported or executed.')
+    print('Custom plugins and unsupported old service commands were not imported or executed.')
 
 
 if __name__=='__main__':main()
