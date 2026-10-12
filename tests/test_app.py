@@ -33,6 +33,29 @@ class ApiTestCase(unittest.TestCase):
         with self.opener.open(self.url+'/api/state') as r:return json.load(r)
 
 class Workflow(ApiTestCase):
+    def test_period_report_filters_and_includes_older_events(self):
+        for name,ip in [('Router','192.168.1.1'),('Switch','192.168.1.2')]:
+            self.post('/api/devices',dict(name=name,ip=ip,kind='router'))
+        router,switch=[d['id'] for d in self.state()['devices']]
+        with app.connect() as conn:
+            for i in range(125):
+                conn.execute('INSERT INTO events(device_id,status,created_at,output,state_type) VALUES(?,?,?,?,?)',
+                    (router,'CRITICAL' if i%2 else 'OK',1000+i,'check','HARD'))
+            conn.execute("INSERT INTO events(device_id,status,created_at,output,state_type) VALUES(?,'CRITICAL',1010,'other','HARD')",(switch,))
+        with self.opener.open(self.url+f'/api/report?start=1000&end=1125&device_id={router}') as response:
+            report=json.load(response)
+        self.assertEqual(len(report['events']),125)
+        self.assertEqual(report['summary'][0]['host_down'],62)
+        self.assertEqual(report['summary'][0]['host_recovered'],63)
+        self.assertEqual(len(self.state()['events']),100)
+        for query in ('start=10&end=10','start=0&end=999999999','start=nan&end=20','start=1&end=2&device_id=-1'):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.opener.open(self.url+'/api/report?'+query)
+            self.assertEqual(error.exception.code,400)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(self.url+'/api/report?start=1&end=2')
+        self.assertEqual(error.exception.code,401)
+
     def test_service_details_only_returns_selected_service_events(self):
         self.post('/api/devices',dict(name='Router',ip='192.168.1.1',kind='router'))
         host=self.state()['devices'][0]['id']

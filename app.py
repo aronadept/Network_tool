@@ -264,6 +264,44 @@ class Handler(BaseHTTPRequestHandler):
             session = self.session()
             self.respond(200, {'authenticated':bool(session),'username':session['username'] if session else None,'csrf':session['csrf'] if session else None})
             return
+        if urlsplit(self.path).path == '/api/report':
+            if not self.session():
+                self.respond(401, {'error':'Please sign in'})
+                return
+            try:
+                query = parse_qs(urlsplit(self.path).query)
+                start, end = float(query['start'][0]), float(query['end'][0])
+                device_id = int(query.get('device_id', ['0'])[0])
+                if not all(map(math.isfinite, (start, end))) or start >= end or end-start > 366*86400 or device_id < 0:
+                    raise ValueError()
+            except (KeyError, ValueError, OverflowError):
+                self.respond(400, {'error':'Select a valid date range of at most 366 days'})
+                return
+            with connect() as conn:
+                devices = [dict(r) for r in conn.execute('SELECT id,name,ip,kind FROM devices WHERE (?=0 OR id=?) ORDER BY name',
+                    (device_id,device_id))]
+                rows = [dict(r) for r in conn.execute('''
+                    SELECT e.created_at,e.device_id,d.name AS device_name,d.ip,d.kind,
+                           e.service_id,COALESCE(s.name,'Host ping') AS check_name,
+                           e.status,e.state_type,e.output
+                    FROM events e JOIN devices d ON d.id=e.device_id
+                    LEFT JOIN services s ON s.id=e.service_id
+                    WHERE e.created_at>=? AND e.created_at<? AND (?=0 OR e.device_id=?)
+                    ORDER BY e.created_at DESC,e.id DESC''', (start,end,device_id,device_id))]
+            summary = {d['id']:{'device_id':d['id'],'name':d['name'],'ip':d['ip'],
+                'kind':d['kind'],'host_down':0,'host_recovered':0,'service_alerts':0,
+                'service_recovered':0,'changes':0} for d in devices}
+            for row in rows:
+                key = row['device_id']
+                item = summary[key]
+                item['changes'] += 1
+                if row['service_id'] is None:
+                    item['host_recovered' if row['status']=='OK' else 'host_down'] += 1
+                else:
+                    item['service_recovered' if row['status']=='OK' else 'service_alerts'] += 1
+            self.respond(200, {'start':start,'end':end,'summary':sorted(summary.values(),key=lambda x:x['name'].lower()),
+                               'events':rows,'retention':'Latest 10,000 state changes across the network are retained.'})
+            return
         if urlsplit(self.path).path == '/api/service':
             if not self.session():
                 self.respond(401, {'error':'Please sign in'})

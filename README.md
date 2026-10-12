@@ -81,6 +81,8 @@ Refresh the browser with Ctrl+Shift+R after updates. These update commands prese
 
 The interface is rebuilt with a compact Nagios-inspired operations layout: grouped left navigation, an always-visible host/service status strip, clickable dashboard totals, dedicated Host Status and Service Status tables, host groups, problems, maintenance, event history, network topology, configuration and engine diagnostics. Host and service names open individual status/configuration/history pages. Tables support filtering and sorting. Automatic refresh can be paused; manual refresh remains available. All pages adapt to smaller screens. No CDN, example hosts or simulated monitoring values are included.
 
+Under **Reports & System → Event History**, choose **This week**, **Last week**, **This month**, **Last month**, or a custom date range, optionally select a device, then click **Generate report**. The per-device summary counts host failures/recoveries and service alerts/recoveries; the table below shows every retained state change for that period. **Download CSV** exports the event rows. Dates follow the browser's local time. The report uses recorded transitions (including SOFT and HARD) and cannot establish an uptime percentage. Only the latest 10,000 transitions across all devices are retained, so older periods may be incomplete. Deleting a device or service also deletes its history.
+
 For the requested **completely fresh installation**, stop the old app (Ctrl+C, or stop its systemd service). If your terminal is root, switch to the application user with `su - aron`. Then run:
 
 ```sh
