@@ -30,6 +30,7 @@ DISCOVERY_PROGRESS = {'status': 'idle', 'checked': 0, 'total': 0, 'found': 0, 's
 INTERVAL = max(10, int(os.environ.get('POLL_INTERVAL', '30')))
 LOGIN_LOCK = threading.Lock()
 LOGIN_ATTEMPTS = {}
+RX300_MAC_PREFIX = 'B8:27:EB:'
 
 
 def connect():
@@ -91,6 +92,8 @@ def initialize():
                                   'output':"TEXT NOT NULL DEFAULT ''", 'state_type':"TEXT NOT NULL DEFAULT 'HARD'"}.items():
             if name not in event_columns:
                 conn.execute(f'ALTER TABLE events ADD COLUMN {name} {definition}')
+        if 'mac' not in {r['name'] for r in conn.execute('PRAGMA table_info(discovery_results)')}:
+            conn.execute("ALTER TABLE discovery_results ADD COLUMN mac TEXT NOT NULL DEFAULT ''")
     os.chmod(DB, 0o600)
 
 
@@ -132,6 +135,22 @@ def probe(address):
     result = subprocess.run(['ping', '-n', '-c', '1', '-W', '2', address], capture_output=True, text=True, timeout=5)
     match = re.search(r'time[=<]([\d.]+)', result.stdout)
     return ('up' if result.returncode == 0 else 'down', float(match.group(1)) if match else None)
+
+
+def neighbor_mac(address):
+    """Return a direct ARP neighbor's MAC, never a routed gateway's MAC."""
+    try:
+        with open('/proc/net/arp', encoding='ascii') as arp:
+            next(arp)
+            for line in arp:
+                parts = line.split()
+                if len(parts) >= 6 and parts[0] == address and int(parts[2], 16) & 2:
+                    mac = parts[3].upper()
+                    if re.fullmatch(r'(?:[0-9A-F]{2}:){5}[0-9A-F]{2}', mac):
+                        return mac
+    except (OSError, StopIteration, ValueError):
+        pass
+    return ''
 
 
 def short_text(value, name, required=False, limit=80):
@@ -178,9 +197,9 @@ def discover(subnet, cancelled=lambda: False):
     def inspect(address):
         try:
             status, latency = probe(str(address))
-            return str(address), status, latency
+            return str(address), status, latency, neighbor_mac(str(address)) if status == 'up' else ''
         except (OSError, subprocess.TimeoutExpired):
-            return str(address), 'unavailable', None
+            return str(address), 'unavailable', None, ''
     addresses = iter(network.hosts())
     # Keep only one bounded batch in memory, even for a /16.
     with concurrent.futures.ThreadPoolExecutor(max_workers=DISCOVERY_WORKERS) as pool:
@@ -191,13 +210,13 @@ def discover(subnet, cancelled=lambda: False):
                 break
             futures = [pool.submit(inspect, address) for address in batch]
             for future in concurrent.futures.as_completed(futures):
-                address, status, latency = future.result()
+                address, status, latency, mac = future.result()
                 if cancelled():
                     break
                 if status == 'up':
                     with connect() as conn:
-                        conn.execute('INSERT INTO discovery_results(ip,subnet,last_seen,latency) VALUES(?,?,?,?) ON CONFLICT(ip) DO UPDATE SET subnet=excluded.subnet,last_seen=excluded.last_seen,latency=excluded.latency',
-                                     (address,str(network),time.time(),latency))
+                        conn.execute('INSERT INTO discovery_results(ip,subnet,last_seen,latency,mac) VALUES(?,?,?,?,?) ON CONFLICT(ip) DO UPDATE SET subnet=excluded.subnet,last_seen=excluded.last_seen,latency=excluded.latency,mac=CASE WHEN excluded.mac != \'\' THEN excluded.mac ELSE discovery_results.mac END',
+                                     (address,str(network),time.time(),latency,mac))
                 with DISCOVERY_LOCK:
                     DISCOVERY_PROGRESS['checked'] += 1
                     DISCOVERY_PROGRESS['found'] += int(status == 'up')
@@ -360,6 +379,8 @@ class Handler(BaseHTTPRequestHandler):
                 links = [dict(r) for r in conn.execute('SELECT * FROM links')]
                 config = conn.execute('SELECT subnet FROM discovery WHERE id=1').fetchone()
                 candidates = [dict(r) for r in conn.execute('SELECT r.*,d.id AS device_id FROM discovery_results r LEFT JOIN devices d ON d.ip=r.ip WHERE r.subnet=? ORDER BY r.ip', (config['subnet'] if config else '',))]
+                for candidate in candidates:
+                    candidate['rx300_candidate'] = candidate['mac'].startswith(RX300_MAC_PREFIX)
                 events = [dict(r) for r in conn.execute('SELECT e.*,d.name,s.name AS service_name FROM events e JOIN devices d ON d.id=e.device_id LEFT JOIN services s ON s.id=e.service_id ORDER BY e.id DESC LIMIT 100')]
             with DISCOVERY_LOCK:
                 progress = dict(DISCOVERY_PROGRESS)
@@ -469,7 +490,11 @@ class Handler(BaseHTTPRequestHandler):
                             raise ValueError('Only discovered addresses can be added from this list')
                     added = 0
                     for address in addresses:
-                        cursor = conn.execute("INSERT OR IGNORE INTO devices(name,ip,kind) VALUES(?,?,'other')", ('Discovered '+address,address))
+                        discovered = conn.execute('SELECT mac FROM discovery_results WHERE ip=?',(address,)).fetchone()
+                        candidate = discovered['mac'].startswith(RX300_MAC_PREFIX)
+                        cursor = conn.execute('INSERT OR IGNORE INTO devices(name,ip,kind,group_name) VALUES(?,?,?,?)',
+                            (('RX300 candidate ' if candidate else 'Discovered ')+address,address,
+                             'thin_client' if candidate else 'other','Thin clients' if candidate else 'Network'))
                         added += cursor.rowcount
                     reload_engine = bool(added)
                     response.update(added=added,skipped=len(addresses)-added)
@@ -478,7 +503,7 @@ class Handler(BaseHTTPRequestHandler):
                     if ipaddress.ip_address(address).version != 4:
                         raise ValueError('Use an IPv4 address')
                     kind = data.get('kind','other')
-                    if kind not in ('switch','ap','firewall','router','server','nas','printer','camera','phone','other'):
+                    if kind not in ('switch','ap','firewall','router','server','nas','printer','camera','phone','thin_client','other'):
                         raise ValueError('Invalid device type')
                     values = (short_text(data.get('name'),'device name',True),address,kind,
                               short_text(data.get('brand'),'brand'),short_text(data.get('model'),'model'),

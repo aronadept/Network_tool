@@ -144,6 +144,31 @@ class Workflow(ApiTestCase):
         self.assertEqual(self.post('/api/add-discovered',{'ips':['192.168.1.1']})['skipped'],1)
         with self.assertRaises(ValueError):app.discover('192.168.0.0/15')
 
+    def test_rx300_candidate_requires_direct_neighbor_mac_and_explicit_add(self):
+        def fake(address):
+            return ('up', 2.0) if address == '192.168.1.1' else ('down', None)
+        with patch('app.probe', side_effect=fake), patch('app.neighbor_mac', return_value='B8:27:EB:2E:4E:BA'):
+            app.discover('192.168.1.0/30')
+        with app.connect() as conn:
+            conn.execute("INSERT INTO discovery(id,subnet) VALUES(1,'192.168.1.0/30')")
+        row=self.state()['discovery_results'][0]
+        self.assertEqual(row['mac'],'B8:27:EB:2E:4E:BA')
+        self.assertTrue(row['rx300_candidate'])
+        self.assertIsNone(row['device_id'])
+        self.post('/api/add-discovered', {'ips':['192.168.1.1']})
+        devices=self.state()['devices']
+        self.assertEqual(len(devices),1)
+        self.assertEqual(devices[0]['kind'],'thin_client')
+        self.assertEqual(devices[0]['group_name'],'Thin clients')
+
+    def test_neighbor_mac_ignores_incomplete_arp_entry(self):
+        from io import StringIO
+        header='IP address HW type Flags HW address Mask Device\n'
+        with patch('builtins.open', return_value=StringIO(header+'192.168.1.1 0x1 0x0 B8:27:EB:2E:4E:BA * eth0\n')):
+            self.assertEqual(app.neighbor_mac('192.168.1.1'),'')
+        with patch('builtins.open', return_value=StringIO(header+'192.168.1.1 0x1 0x2 B8:27:EB:2E:4E:BA * eth0\n')):
+            self.assertEqual(app.neighbor_mac('192.168.1.1'),'B8:27:EB:2E:4E:BA')
+
     def test_discovery_approval_is_explicit_and_atomic(self):
         with app.connect() as conn:
             conn.execute("INSERT INTO discovery(subnet) VALUES('192.168.1.0/24')")

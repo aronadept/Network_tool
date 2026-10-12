@@ -83,6 +83,8 @@ The interface is rebuilt with a compact Nagios-inspired operations layout: group
 
 Under **Reports & System → Event History**, choose **This week**, **Last week**, **This month**, **Last month**, or a custom date range, optionally select a device, then click **Generate report**. The per-device summary counts host failures/recoveries and service alerts/recoveries; the table below shows every retained state change for that period. **Download CSV** exports the event rows. Dates follow the browser's local time. The report uses recorded transitions (including SOFT and HARD) and cannot establish an uptime percentage. Only the latest 10,000 transitions across all devices are retained, so older periods may be incomplete. Deleting a device or service also deletes its history.
 
+**NComputing RX300+ candidates:** After scanning in **Discovery / Inventory**, enable **RX300+ candidates** to filter hosts whose direct ARP neighbor MAC starts with `B8:27:EB`, the Raspberry Pi Foundation prefix seen on the user's RX300+ devices. The MAC appears only when the Ubuntu server can resolve that host directly on its Layer-2 network; routed devices or unavailable ARP entries will show no MAC and cannot be classified this way. This prefix is a clue, not proof of the model. Review candidates before choosing **Select visible → Add selected**. Newly selected candidates enter inventory as `Thin client` in the `Thin clients` group with an editable candidate name. Scanning alone never adds them, and existing inventory rows are not overwritten.
+
 For the requested **completely fresh installation**, stop the old app (Ctrl+C, or stop its systemd service). If your terminal is root, switch to the application user with `su - aron`. Then run:
 
 ```sh

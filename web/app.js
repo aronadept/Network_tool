@@ -96,11 +96,12 @@ $('links').innerHTML=s.links.map(l=>`<button data-link="${l.id}">Remove link: ${
 }catch(e){$('health').textContent='Connection lost';$('message').textContent=e.message;}}
 const selectedDiscovered=new Set();
 function updateDiscoverySelection(){$('add-discovered').textContent=`Add selected (${selectedDiscovered.size})`;$('add-discovered').disabled=!selectedDiscovered.size;}
-function renderDiscovery(s){const rows=s.discovery_results||[];const available=new Set(rows.filter(r=>!r.device_id).map(r=>r.ip));for(const ip of selectedDiscovered)if(!available.has(ip))selectedDiscovered.delete(ip);
-$('discovered-devices').innerHTML=rows.map(r=>`<tr><td>${r.device_id?'—':`<input type="checkbox" data-discovered="${esc(r.ip)}" aria-label="Select ${esc(r.ip)}" ${selectedDiscovered.has(r.ip)?'checked':''}>`}</td><td>${esc(r.ip)}</td><td>${r.latency==null?'—':r.latency+' ms'}</td><td>${date(r.last_seen)}</td><td>${r.device_id?'<span class="badge state-OK">Added</span>':'<span class="badge state-PENDING">Not added</span>'}</td></tr>`).join('')||'<tr><td colspan="5">No discovery results yet. Enter a subnet and click Search network.</td></tr>';updateDiscoverySelection();}
+function renderDiscovery(s){const all=s.discovery_results||[],rows=$('rx300-only').checked?all.filter(r=>r.rx300_candidate):all;const available=new Set(all.filter(r=>!r.device_id).map(r=>r.ip));for(const ip of selectedDiscovered)if(!available.has(ip))selectedDiscovered.delete(ip);
+$('discovered-devices').innerHTML=rows.map(r=>`<tr><td>${r.device_id?'—':`<input type="checkbox" data-discovered="${esc(r.ip)}" aria-label="Select ${esc(r.ip)}" ${selectedDiscovered.has(r.ip)?'checked':''}>`}</td><td>${esc(r.ip)}</td><td>${esc(r.mac||'—')}</td><td>${r.rx300_candidate?'<span class="badge state-WARNING">RX300+ candidate</span>':'—'}</td><td>${r.latency==null?'—':r.latency+' ms'}</td><td>${date(r.last_seen)}</td><td>${r.device_id?'<span class="badge state-OK">Added</span>':'<span class="badge state-PENDING">Not added</span>'}</td></tr>`).join('')||'<tr><td colspan="7">No matching discovery results. MAC identification needs direct ARP access from this server.</td></tr>';updateDiscoverySelection();}
+$('rx300-only').onchange=()=>{if(latestState)renderDiscovery(latestState);};
 document.addEventListener('change',e=>{const ip=e.target.dataset.discovered;if(!ip)return;if(e.target.checked){if(selectedDiscovered.size>=256){e.target.checked=false;$('message').textContent='Select at most 256 devices per batch.';return;}selectedDiscovered.add(ip);}else selectedDiscovered.delete(ip);updateDiscoverySelection();});
 $('clear-discovered').onclick=()=>{selectedDiscovered.clear();if(latestState)renderDiscovery(latestState);};
-$('select-discovered').onclick=()=>{if(!latestState)return;selectedDiscovered.clear();for(const row of (latestState.discovery_results||[]).filter(r=>!r.device_id).slice(0,256))selectedDiscovered.add(row.ip);renderDiscovery(latestState);};
+$('select-discovered').onclick=()=>{if(!latestState)return;selectedDiscovered.clear();for(const row of (latestState.discovery_results||[]).filter(r=>!r.device_id&&(!$('rx300-only').checked||r.rx300_candidate)).slice(0,256))selectedDiscovered.add(row.ip);renderDiscovery(latestState);};
 $('add-discovered').onclick=async()=>{const button=$('add-discovered');button.disabled=true;try{const result=await request('/api/add-discovered',{ips:[...selectedDiscovered]});selectedDiscovered.clear();await refresh();$('message').textContent=`Added ${result.added} devices; ${result.skipped} already present.`;}catch(error){$('message').textContent=error.message;}finally{updateDiscoverySelection();}};
 function resetDeviceForm(){$('device-form').reset();$('device-form').elements.id.value='';$('device-title').textContent='Add device';$('device-save').textContent='Add device';$('cancel-edit').hidden=true;}
 $('cancel-edit').onclick=resetDeviceForm;
@@ -152,7 +153,7 @@ function renderTopology(s){
  const devices=new Map(s.devices.map(d=>[d.id,d]));const neighbors=new Map(s.devices.map(d=>[d.id,new Set()]));
  const links=s.links.filter(l=>devices.has(l.source)&&devices.has(l.target));
  links.forEach(l=>{neighbors.get(l.source).add(l.target);neighbors.get(l.target).add(l.source);});
- const rank=d=>({firewall:0,router:1,switch:2,ap:3,server:4,nas:4,printer:5,camera:5,phone:5,other:6}[d.kind]??5);
+ const rank=d=>({firewall:0,router:1,switch:2,ap:3,server:4,nas:4,printer:5,camera:5,phone:5,thin_client:5,other:6}[d.kind]??5);
  const ordered=[...s.devices].sort((a,b)=>rank(a)-rank(b)||neighbors.get(b.id).size-neighbors.get(a.id).size||a.name.localeCompare(b.name));
  const positions=new Map(),seen=new Set();let offset=60,maxWidth=1000;
  for(const root of ordered){
