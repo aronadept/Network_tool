@@ -171,3 +171,25 @@ Click a device name in Host status to open its detail page: live host state, che
 Open a host detail page, choose **SNMP credentials** (the device is preselected), and save its v2c or v3 credentials. Return to the device and click **Fetch device details**. The server reads standard system hostname, description, object ID, uptime, location/contact and IF-MIB interface descriptions, operational states and reported speeds on UDP 161. Details are persisted as a timestamped snapshot separate from the manual inventory; names, brands, models, service checks and topology connections are not overwritten. Fetching does not create service checks.
 
 Requests use saved encrypted credentials and are limited to 25 seconds and 64 interface entries. Unsupported fields are left unavailable with partial-result messages. Failed fetches keep the previous successful snapshot. Automatic LLDP links, model identification, CPU/RAM metrics and traffic-rate graphs are not implemented by this action. Interface speeds are reported IF-MIB values; very fast interfaces can exceed the legacy ifSpeed range. Only the selected host is queried, and credentials are never returned to the browser.
+
+## Import devices from an older Nagios ZIP backup
+
+Copy the ZIP to the machine running this app. The importer reads host definitions without extracting the archive or executing its plugins/scripts. It imports IPv4 addresses, names, a first hostgroup (when configured), and suggested types/brands based on host names. Repeated IPs across snapshots are deduplicated; existing inventory is never overwritten. Top-level `Nagios/server/` definitions are preferred over dated/older snapshots when names differ for one IP. The preview includes the union of custom hosts from all snapshots, which may include retired devices; review it before applying.
+
+As the application user in the app directory, preview the backup:
+
+```sh
+cd /home/hl-agro/Network_tool
+.venv/bin/python scripts/import_nagios.py /path/to/Nagios.zip
+```
+
+Then stop `network-monitor` as root (`systemctl stop network-monitor`). As the application user, add the reviewed hosts:
+
+```sh
+cd /home/hl-agro/Network_tool
+.venv/bin/python scripts/import_nagios.py /path/to/Nagios.zip --apply
+```
+
+Start the service as root (`systemctl start network-monitor`) and check Host Status. Use `/home/aron/Network_tool` and user `aron` for the original container. A custom database requires the same `NETWORK_DB` setting used by the app. Keep any backup ZIP outside the repository; it may contain secrets. The importer itself does not print/import credentials.
+
+By default, hosts under `objects/` and `localhost` are treated as bundled examples and excluded. If your real host definitions are under `objects/`, preview with `--include-example-hosts` and use that same flag with `--apply`; loopback, invalid/DNS-only and multicast addresses remain excluded. Templates without concrete addresses are not resolved. The importer adds inventory and automatic host ping checks only; old service commands, plugin binaries, credentials, accounts and topology are not migrated. Configure compatible service checks and SNMP credentials through the console afterwards. Running the import again skips already-present IPs.
