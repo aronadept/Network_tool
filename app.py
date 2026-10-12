@@ -440,7 +440,7 @@ class Handler(BaseHTTPRequestHandler):
                     if ipaddress.ip_address(address).version != 4:
                         raise ValueError('Use an IPv4 address')
                     kind = data.get('kind','other')
-                    if kind not in ('switch','ap','firewall','router','server','other'):
+                    if kind not in ('switch','ap','firewall','router','server','nas','printer','camera','phone','other'):
                         raise ValueError('Invalid device type')
                     values = (short_text(data.get('name'),'device name',True),address,kind,
                               short_text(data.get('brand'),'brand'),short_text(data.get('model'),'model'),

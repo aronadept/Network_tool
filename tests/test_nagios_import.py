@@ -57,3 +57,27 @@ class NagiosImport(unittest.TestCase):
                     self.assertEqual(d['name'],'Existing name');self.assertEqual(d['brand'],'Existing brand')
                     self.assertEqual(c.execute('SELECT COUNT(*) FROM services').fetchone()[0],0)
         finally:app.DB=old
+
+class CurrentTarImport(unittest.TestCase):
+    def test_tar_camera_check_ips_and_types(self):
+        import io,tarfile
+        config='''define host {\n host_name Synology_NAS\n address 192.168.1.10\n alias NAS Storage Device\n}\ndefine host {\n host_name Camera_Status\n alias Cameras\n hostgroups Hikvision_camera\n}\ndefine service {\n host_name Camera_Status\n service_description Gate 01 Camera\n check_command check_camera!192.168.2.11\n}\ndefine service {\n host_name Camera_Status\n service_description Gate 02 Camera\n check_command check_camera!192.168.2.12\n}\ndefine host {\n host_name EPSON_WF-C5890\n address 192.168.1.20\n alias Network Printer\n}\n'''
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/'backup.tar.gz'
+            with tarfile.open(path,'w:gz') as archive:
+                data=config.encode();info=tarfile.TarInfo('usr/local/nagios/etc/server/hosts.cfg');info.size=len(data)
+                archive.addfile(info,io.BytesIO(data))
+                link=tarfile.TarInfo('usr/local/nagios/etc/server/linked.cfg');link.type=tarfile.SYMTYPE;link.linkname='../outside.cfg'
+                archive.addfile(link)
+            hosts,report=loader.read_backup(path)
+            self.assertEqual(len(hosts),4)
+            self.assertEqual({h['kind'] for h in hosts},{'nas','printer','camera'})
+            self.assertEqual(report['camera_from_checks'],2)
+            self.assertEqual({h['group_name'] for h in hosts if h['kind']=='camera'},{'Cameras'})
+            self.assertFalse((Path(folder).parent/'outside.cfg').exists())
+
+    def test_explicit_device_categories(self):
+        self.assertEqual(loader.classify('Synology_NAS','NAS Storage Device')[0],'nas')
+        self.assertEqual(loader.classify('imageRUNNER_IR3020','Network Printer')[0],'printer')
+        self.assertEqual(loader.classify('Gate_Camera','Cameras')[0],'camera')
+        self.assertEqual(loader.classify('IP-Phone_Office','SIP Phone')[0],'phone')

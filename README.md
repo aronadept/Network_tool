@@ -172,9 +172,9 @@ Open a host detail page, choose **SNMP credentials** (the device is preselected)
 
 Requests use saved encrypted credentials and are limited to 25 seconds and 64 interface entries. Unsupported fields are left unavailable with partial-result messages. Failed fetches keep the previous successful snapshot. Automatic LLDP links, model identification, CPU/RAM metrics and traffic-rate graphs are not implemented by this action. Interface speeds are reported IF-MIB values; very fast interfaces can exceed the legacy ifSpeed range. Only the selected host is queried, and credentials are never returned to the browser.
 
-## Import devices from an older Nagios ZIP backup
+## Import devices from Nagios ZIP or TAR.GZ backups
 
-Copy the ZIP to the machine running this app. The importer reads host definitions without extracting the archive or executing its plugins/scripts. It imports IPv4 addresses, names, a first hostgroup (when configured), and suggested types/brands based on host names. Repeated IPs across snapshots are deduplicated; existing inventory is never overwritten. Top-level `Nagios/server/` definitions are preferred over dated/older snapshots when names differ for one IP. The preview includes the union of custom hosts from all snapshots, which may include retired devices; review it before applying.
+Copy the ZIP or TAR.GZ archive to the machine running this app. The importer reads host definitions without extracting the archive or executing its plugins/scripts. It imports IPv4 addresses, names, a first hostgroup (when configured), and suggested types/brands based on host names. Repeated IPs across snapshots are deduplicated; existing inventory is never overwritten. Top-level `Nagios/server/` definitions are preferred over dated/older snapshots when names differ for one IP. The preview includes the union of custom hosts from all snapshots, which may include retired devices; review it before applying.
 
 As the application user in the app directory, preview the backup:
 
@@ -190,7 +190,7 @@ cd /home/hl-agro/Network_tool
 .venv/bin/python scripts/import_nagios.py /path/to/Nagios.zip --apply
 ```
 
-Start the service as root (`systemctl start network-monitor`) and check Host Status. Use `/home/aron/Network_tool` and user `aron` for the original container. A custom database requires the same `NETWORK_DB` setting used by the app. Keep any backup ZIP outside the repository; it may contain secrets. The importer itself does not print/import credentials.
+Start the service as root (`systemctl start network-monitor`) and check Host Status. Use `/home/aron/Network_tool` and user `aron` for the original container. A custom database requires the same `NETWORK_DB` setting used by the app. Keep backup archives outside the repository; it may contain secrets. The importer itself does not print/import credentials.
 
 By default, hosts under `objects/` and `localhost` are treated as bundled examples and excluded. If your real host definitions are under `objects/`, preview with `--include-example-hosts` and use that same flag with `--apply`; loopback, invalid/DNS-only and multicast addresses remain excluded. Templates without concrete addresses are not resolved. The importer adds inventory and automatic host ping checks only; old service commands, plugin binaries, credentials, accounts and topology are not migrated. Configure compatible service checks and SNMP credentials through the console afterwards. Running the import again skips already-present IPs.
 
@@ -205,3 +205,21 @@ systemctl start network-monitor
 ```
 
 For an installation using `hl-agro`, change the username and home directory in the command. `clear_inventory.py` removes **all** monitored devices, their service checks, saved connections, state history and SNMP inventory snapshots. It also clears and disables discovery so old scan results cannot be selected later. Login accounts and sessions stay available. This operation affects the configured `NETWORK_DB` (default: `data/network.db`); use the same setting as the service if customized. It does not delete backup ZIP files or backups stored elsewhere.
+
+### Import a current Nagios configuration TAR.GZ
+
+Copy `nagios-config-2026-10-12.tar.gz` to `/home/aron/` on the Ubuntu server. Update the feature branch, then preview the archive as `aron`:
+
+```sh
+cd /home/aron/Network_tool
+git pull --ff-only origin feature/network-monitor-mvp
+.venv/bin/python scripts/import_nagios.py /home/aron/nagios-config-2026-10-12.tar.gz
+```
+
+Review the addresses in the preview. Stop `network-monitor` as root, run the import as `aron`, then start the service as root:
+
+```sh
+systemctl stop network-monitor
+su - aron -c 'cd /home/aron/Network_tool && .venv/bin/python scripts/import_nagios.py /home/aron/nagios-config-2026-10-12.tar.gz --apply'
+systemctl start network-monitor
+``` This archive contains NAS, printers, IP phones, switches, access points, routers, servers and cameras. NAS, printer, camera and phone have dedicated inventory types and can be found by the **Device type** filter or Host Status search. Some camera definitions contain an IP only in a single check argument; the importer reads that literal address as data. Host definitions with no usable IP are reported as unresolved and cannot become monitored devices until their address is known. The importer never executes old checks or plugins and does not import secrets.
