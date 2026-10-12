@@ -193,3 +193,15 @@ cd /home/hl-agro/Network_tool
 Start the service as root (`systemctl start network-monitor`) and check Host Status. Use `/home/aron/Network_tool` and user `aron` for the original container. A custom database requires the same `NETWORK_DB` setting used by the app. Keep any backup ZIP outside the repository; it may contain secrets. The importer itself does not print/import credentials.
 
 By default, hosts under `objects/` and `localhost` are treated as bundled examples and excluded. If your real host definitions are under `objects/`, preview with `--include-example-hosts` and use that same flag with `--apply`; loopback, invalid/DNS-only and multicast addresses remain excluded. Templates without concrete addresses are not resolved. The importer adds inventory and automatic host ping checks only; old service commands, plugin binaries, credentials, accounts and topology are not migrated. Configure compatible service checks and SNMP credentials through the console afterwards. Running the import again skips already-present IPs.
+
+## Clear every monitored device
+
+If an old import should be removed entirely, stop the service as root. Then run the clearing command as the application user, and start the service again as root:
+
+```sh
+systemctl stop network-monitor
+su - aron -c 'cd /home/aron/Network_tool && .venv/bin/python scripts/clear_inventory.py'
+systemctl start network-monitor
+```
+
+For an installation using `hl-agro`, change the username and home directory in the command. `clear_inventory.py` removes **all** monitored devices, their service checks, saved connections, state history and SNMP inventory snapshots. It also clears and disables discovery so old scan results cannot be selected later. Login accounts and sessions stay available. This operation affects the configured `NETWORK_DB` (default: `data/network.db`); use the same setting as the service if customized. It does not delete backup ZIP files or backups stored elsewhere.
