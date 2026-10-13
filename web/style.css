@@ -191,7 +191,8 @@ th[aria-sort=ascending],th[aria-sort=descending]{background:#e0ebf5;color:#137ab
 #message:empty{display:none}
 #message{padding:11px 14px;background:#e5f0fa;border:1px solid #c6ddee;color:#467b9e;margin:0 0 18px;border-radius:3px}
 .page-footer{padding:0 23px 22px;display:flex;justify-content:space-between;font-size:10px;color:#97a5b3}
-.login-screen{min-height:100vh;background:linear-gradient(120deg,#1c2c3e,#304960);display:flex;align-items:center;justify-content:center;gap:90px;padding:40px}
+.login-screen{position:relative;min-height:100vh;background:linear-gradient(120deg,#1c2c3e,#304960);display:flex;align-items:center;justify-content:center;gap:90px;padding:40px}
+.login-page-credit{position:absolute;right:24px;bottom:18px;color:#a8bfce;font-size:10px}
 .login-intro{max-width:420px;color:#fff}
 .login-intro h1{color:#fff;font-size:46px;line-height:1.2}
 .login-intro p{font-size:13px;color:#a1b9cd;margin-top:25px}
@@ -221,7 +222,7 @@ main{padding:18px 15px}
 .dashboard-grid,.columns{grid-template-columns:1fr}
 .page-footer{padding:0 15px 20px}
 .page-footer>span:last-child{display:none}
-.login-screen{gap:35px;flex-direction:column;padding:35px 20px}
+.login-screen{gap:35px;flex-direction:column;padding:35px 20px 54px}
 .login-intro{display:none}
 .login-card{padding:25px}
 .panel-heading{flex-wrap:wrap}
@@ -265,10 +266,8 @@ h1{font-size:24px}
 .company-logo-plate img{display:block;max-width:100%;height:auto}
 .login-intro h1{font-size:37px}
 .login-intro p.company-name{font-size:18px;color:#e3eddd;margin:12px 0 22px}
-.login-intro p.design-credit{font-size:11px;color:#a8bfce;margin-top:32px}
 .login-card-logo{display:block;max-width:100%;height:auto;margin:0 0 22px}
 .login-card .login-company{margin:0 0 12px;color:#657b50;font-size:12px}
-.login-card .login-credit{font-size:10px;color:#8796a4;text-align:center;margin:20px 0 0;padding-top:16px;border-top:1px solid #e1e7ed}
 .page-footer{gap:12px;flex-wrap:wrap;line-height:1.5}
 .page-footer strong{font-weight:600}
 @media(max-width:850px){.page-footer>span.design-credit{display:block}.sidebar-brand{min-height:150px}}
